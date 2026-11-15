@@ -1307,24 +1307,32 @@ FC.Cabin.prototype.update = function (dt, env, targetLamp) {
   /* --- 门口提灯：天色越暗越亮 --- */
   const dark = FC.clamp(1 - env.cur.sunIntensity / 1.9, 0, 1);
   const dl = Math.max(dark * 0.9, L * 0.8);
-  if (this.lanternGlass) this.lanternGlass.material.emissiveIntensity = dl * 2.2;
-  if (this.lanternGlow) this.lanternGlow.material.opacity = dl * 0.7;
-  if (this.doorLight) this.doorLight.intensity = dl * 1.5;
+  if (this.lanternGlass) this.lanternGlass.material.emissiveIntensity = dl * 2.8;
+  if (this.lanternGlow) this.lanternGlow.material.opacity = dl * 0.9;
+  if (this.doorLight) this.doorLight.intensity = dl * 2.0;
 
   /* --- 屋檐吊灯 ×4：夜 / 雨 / 雾自动点亮 ---
      晴天 sunIntensity≈2.35 → dark=0 熄灭；
      雾/雨 sunIntensity≈0.62 → dark≈0.67 亮起；
-     夜晚 sunIntensity≈0.30 → dark≈0.84 最亮。
-     dusk(2.0) 只有一丝微光，不算"坏天气"。 */
+     夜晚 sunIntensity≈0.34 → dark≈0.85；
+     黄昏 sunIntensity≈1.72 → dark≈0.09，只会有一点点暖意（灯刚点起来）。
+     ⚠️ 亮度整体调高：灯泡 emissive 2.6→3.4、光晕 0.62→0.92、点光 1.35→1.85，
+        夜里屋檐下一圈灯明显更"亮堂"，成为夜景的视觉重点。 */
   if (this.eaveLamps) {
-    const el = dark * (0.92 + 0.08 * Math.sin(t * 3.7));   // 轻微灯丝闪烁
+    // 黄昏起就点灯：用一条更早启动的曲线（sunIntensity<2.0 就开始有微光）
+    const duskBoost = FC.clamp(1 - env.cur.sunIntensity / 2.05, 0, 1);
+    const base = Math.max(dark, duskBoost * 0.55);
+    const el = base * (0.94 + 0.06 * Math.sin(t * 3.7));   // 轻微灯丝闪烁
     for (let i = 0; i < this.eaveLamps.length; i++) {
       const e = this.eaveLamps[i];
       const ph = i * 1.7;                                   // 每盏相位错开
-      const f = el * (0.94 + 0.06 * Math.sin(t * 4.3 + ph));
-      e.glassMat.emissiveIntensity = f * 2.6;
-      e.glow.material.opacity = f * 0.62;
-      if (e.light) e.light.intensity = f * 1.35;
+      const f = el * (0.95 + 0.05 * Math.sin(t * 4.3 + ph));
+      e.glassMat.emissiveIntensity = f * 3.4;
+      e.glow.material.opacity = f * 0.92;
+      // 光晕随亮度轻微呼吸，像是灯芯在轻轻晃
+      const gs = 1.15 + f * 0.55;
+      e.glow.scale.set(gs, gs, 1);
+      if (e.light) e.light.intensity = f * 1.85;
     }
   }
 
