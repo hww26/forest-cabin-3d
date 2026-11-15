@@ -424,6 +424,12 @@
 
     // 音频
     if (audio) {
+      // 相机到河道的横向距离（控制流水声远近）
+      if (audio.ctx) {
+        const rd = Math.abs(camera.position.x - FC.RIVER.riverX(camera.position.z));
+        const inRange = camera.position.z >= FC.RIVER.z0 - 6 && camera.position.z <= FC.RIVER.z1 + 6;
+        audio.camDistToRiver = inRange ? rd : 999;
+      }
       audio.update(dt);
       // 跟随相机位置：室外近火炉时能听到一点
       const d = camera.position.distanceTo(new three.Vector3(-cabin.W + 0.6, 1, -1.3));
