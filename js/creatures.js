@@ -30,6 +30,7 @@ FC.Creatures = function (scene, vegetation, terrain, cabin, quality) {
   this.buildButterflies();
   this.buildBees();
   if (this.quality !== 'low') this.buildAnts();
+  this.buildFish();
 };
 
 /* ============================================================
@@ -590,6 +591,69 @@ FC.Creatures.prototype.buildAnts = function () {
 };
 
 /* ============================================================
+   ⑧ 鱼（河里，InstancedMesh，沿河道来回游动 + 摆尾）
+   ============================================================ */
+FC.Creatures.prototype.buildFish = function () {
+  const three = FC.THREE;
+  const N = this.quality === 'low' ? 4 : 9;
+  this.fishCount = N;
+
+  // 低模鱼身：椭球压扁 + 尾鳍（整体一个几何，摆尾用整体扭转近似）
+  const body = new three.SphereGeometry(1, 6, 5);
+  const bp = body.attributes.position;
+  for (let i = 0; i < bp.count; i++) {
+    const x = bp.getX(i);
+    const taper = 1 - Math.max(0, x) * 0.55;      // 头钝尾细
+    bp.setXYZ(i, x * 0.30, bp.getY(i) * 0.16 * taper, bp.getZ(i) * 0.14 * taper);
+  }
+  body.computeVertexNormals();
+  const tail = new three.ConeGeometry(0.09, 0.22, 4);
+  tail.rotateZ(Math.PI / 2);
+  tail.translate(-0.36, 0, 0);
+  tail.rotateX(Math.PI / 2);                       // 让鳍面竖直
+  const fishGeo = new FC.THREE.BufferGeometry();
+  // 简单拼接：直接 merge 会更干净，但 util 的 mergeGeos 不带颜色也行（用单色材质）
+  const merged = FC.mergeGeos([body.toNonIndexed(), tail]);
+  // 上深下浅的顶点色（背青腹白）
+  const pos = merged.attributes.position;
+  const col = new Float32Array(pos.count * 3);
+  const cTop = new three.Color('#4a6d5a'), cBot = new three.Color('#c8cec2');
+  for (let i = 0; i < pos.count; i++) {
+    const t = FC.clamp(pos.getY(i) * 6 + 0.5, 0, 1);
+    const c = cBot.clone().lerp(cTop, t);
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  merged.setAttribute('color', new three.BufferAttribute(col, 3));
+  merged.computeVertexNormals();
+
+  const mat = new three.MeshStandardMaterial({
+    vertexColors: true, roughness: .35, metalness: .25, flatShading: true
+  });
+  this.fishIM = new three.InstancedMesh(merged, mat, N);
+  this.fishIM.instanceMatrix.setUsage(three.DynamicDrawUsage);
+  this.fishIM.frustumCulled = false;
+  this.group.add(this.fishIM);
+
+  const R = FC.RIVER;
+  this.fishData = [];
+  const rng = FC.rng(9341);
+  for (let i = 0; i < N; i++) {
+    const z = FC.rand(R.z0 + 4, R.z1 - 4);
+    this.fishData.push({
+      z,                                     // 沿河位置
+      dir: rng() < 0.5 ? 1 : -1,             // 游动方向
+      speed: FC.rand(0.5, 1.15),
+      off: FC.rand(-0.55, 0.55),             // 横向偏移（河心±）
+      depth: FC.rand(0.16, 0.42),            // 水面下深度（浅一点，透过水面可见）
+      tailPhase: rng() * 6.28,
+      tailSpeed: FC.rand(5, 8),
+      wiggleAmp: FC.rand(0.14, 0.26),
+      turnT: 0, size: FC.rand(0.7, 1.15)
+    });
+  }
+};
+
+/* ============================================================
    每帧更新
    ============================================================ */
 FC.Creatures.prototype.update = function (dt, camera, env) {
@@ -625,6 +689,51 @@ FC.Creatures.prototype.update = function (dt, camera, env) {
     this.antIM.visible = av > 0.3;
     if (this.antIM.visible) this.updAnts(dt, T);
   }
+
+  /* ---------- 鱼：一直在河里（夜里游得深、看不见即可，不做下班） ---------- */
+  if (this.fishIM) this.updFish(dt, T);
+};
+
+/* ---------- 鱼：沿河道游动 + 摆尾 ---------- */
+FC.Creatures.prototype.updFish = function (dt, T) {
+  const three = FC.THREE;
+  const R = FC.RIVER;
+  for (let i = 0; i < this.fishData.length; i++) {
+    const F = this.fishData[i];
+    F.z += F.dir * F.speed * dt;
+    // 到河段尽头掉头
+    if (F.z > R.z1 - 3) { F.dir = -1; }
+    if (F.z < R.z0 + 3) { F.dir = 1; }
+    // 偶尔掉头
+    F.turnT -= dt;
+    if (F.turnT <= 0) {
+      F.turnT = FC.rand(4, 12);
+      if (Math.random() < 0.35) F.dir *= -1;
+      if (Math.random() < 0.5) F.off = FC.rand(-0.55, 0.55);
+    }
+    const x = R.riverX(F.z) + F.off * R.halfW;
+    const y = R.waterY - F.depth + Math.sin(T * 1.3 + i * 2.1) * 0.05;
+    const yaw = F.dir > 0 ? Math.PI : 0;               // 朝游动方向
+    // 摆尾：整体绕 Y 轻扭（近似摆尾）
+    const wig = Math.sin(T * F.tailSpeed + F.tailPhase) * F.wiggleAmp;
+    this._tE.set(0, yaw + wig * 0.35, wig * 0.5);
+    this._tQ.setFromEuler(this._tE);
+    this._tP.set(x, y, F.z);
+    this._tS.setScalar(F.size);
+    this._tM.compose(this._tP, this._tQ, this._tS);
+    this.fishIM.setMatrixAt(i, this._tM);
+  }
+  this.fishIM.instanceMatrix.needsUpdate = true;
+};
+
+/* ---------- 河边取水点：随机挑河岸一处（水线外一点，动物站得下） ---------- */
+FC.Creatures.prototype.pickDrinkSpot = function () {
+  const R = FC.RIVER;
+  const rng = Math.random;
+  const z = FC.rand(R.z0 + 3, R.z1 - 3);
+  const side = rng() < 0.5 ? -1 : 1;
+  const x = R.riverX(z) + side * (R.halfW + R.bankW * 0.42);   // 站在岸坡上，头能探到水
+  return { x, z };
 };
 
 /* ---------- 松鼠 ---------- */
@@ -728,18 +837,62 @@ FC.Creatures.prototype.updRabbit = function (A, dt, T) {
       e.pivot.rotation.x = Math.sin(T * 1.3 + e.side * 2) * 0.14;
     });
     if (A.stateT <= 0) {
-      A.state = 'hop';
-      A.stateT = FC.rand(1.6, 4.0);
-      // 选个近距离目标
-      const a = Math.random() * 6.28, r = 2.5 + Math.random() * 5;
-      const tx = o.position.x + Math.cos(a) * r, tz = o.position.z + Math.sin(a) * r;
-      // 别跑到小屋/池塘里
-      if (FC.blocked(tx, tz) || this.terrain.distToPath(tx, tz) < 0.7) {
-        A.target.set(o.position.x, 0, o.position.z);
+      // ⭐ 约三成概率去河边喝水
+      if (Math.random() < 0.3) {
+        A.state = 'goDrink';
+        const p = this.pickDrinkSpot();
+        A.target.set(p.x, FC.terrainHeight(p.x, p.z), p.z);
+        A.yaw = Math.atan2(A.target.x - o.position.x, A.target.z - o.position.z);
+        A.stateT = 22;                          // 赶路宽限
       } else {
-        A.target.set(tx, FC.terrainHeight(tx, tz), tz);
+        A.state = 'hop';
+        A.stateT = FC.rand(1.6, 4.0);
+        // 选个近距离目标
+        const a = Math.random() * 6.28, r = 2.5 + Math.random() * 5;
+        const tx = o.position.x + Math.cos(a) * r, tz = o.position.z + Math.sin(a) * r;
+        // 别跑到小屋/池塘里
+        if (FC.blocked(tx, tz) || this.terrain.distToPath(tx, tz) < 0.7) {
+          A.target.set(o.position.x, 0, o.position.z);
+        } else {
+          A.target.set(tx, FC.terrainHeight(tx, tz), tz);
+        }
+        A.yaw = Math.atan2(A.target.x - o.position.x, A.target.z - o.position.z);
       }
-      A.yaw = Math.atan2(A.target.x - o.position.x, A.target.z - o.position.z);
+    }
+  } else if (A.state === 'goDrink') {
+    // 跳向河边取水点（复用跳跃移动，速度稍快）
+    const dir = new three.Vector3().subVectors(A.target, o.position);
+    dir.y = 0;
+    const dist = dir.length();
+    A.hopPhase += dt * 3.6;
+    const hopY = Math.abs(Math.sin(A.hopPhase * Math.PI)) * 0.14;
+    if (dist < 0.5 || A.stateT <= 0) {
+      A.state = 'drinking';
+      A.stateT = FC.rand(2.8, 5.5);
+      o.position.y = FC.terrainHeight(o.position.x, o.position.z);
+    } else {
+      dir.normalize();
+      const sp = A.speed * 1.25 * (0.5 + Math.abs(Math.sin(A.hopPhase * Math.PI)) * 1.1);
+      o.position.addScaledVector(dir, sp * dt);
+      o.position.y = FC.terrainHeight(o.position.x, o.position.z) + hopY;
+      const dy = ((A.yaw - o.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      o.rotation.y += dy * Math.min(1, dt * 7);
+    }
+    A.ears.forEach(e => {
+      e.pivot.rotation.z = -e.side * 0.22 + Math.sin(T * 6 + e.side) * 0.18;
+    });
+  } else if (A.state === 'drinking') {
+    // 低头喝水：身体前倾、头压低
+    o.rotation.z = 0;
+    o.rotation.x = 0.34 + Math.sin(T * 1.1) * 0.05;
+    A.ears.forEach(e => {
+      e.pivot.rotation.z = -e.side * 0.5;
+      e.pivot.rotation.x = 0.3;
+    });
+    if (A.stateT <= 0) {
+      A.state = 'idle';
+      A.stateT = FC.rand(2, 4);
+      o.rotation.x = 0;
     }
   } else {
     // 跳跃移动：抛物线轨迹
@@ -781,8 +934,42 @@ FC.Creatures.prototype.updDeer = function (A, dt, T) {
     o.rotation.x = 0;
     o.position.y = FC.terrainHeight(o.position.x, o.position.z);
     if (A.stateT <= 0) {
-      A.state = 'walk';
-      A.stateT = FC.rand(4, 10);
+      // ⭐ 约四成概率去河边喝水
+      if (Math.random() < 0.4) {
+        A.state = 'goDrink';
+        const p = this.pickDrinkSpot();
+        A.drinkTarget = p;
+        A.stateT = 40;                          // 赶路宽限（鹿走得慢）
+      } else {
+        A.state = 'walk';
+        A.stateT = FC.rand(4, 10);
+      }
+    }
+  } else if (A.state === 'goDrink') {
+    // 沿直线走向河边取水点
+    const p = A.drinkTarget;
+    const dx = p.x - o.position.x, dz = p.z - o.position.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.7 || A.stateT <= 0) {
+      A.state = 'drinking';
+      A.stateT = FC.rand(3.5, 7);
+      o.position.y = FC.terrainHeight(o.position.x, o.position.z);
+    } else {
+      const sp = A.speed * 2.6;
+      o.position.x += dx / dist * sp * dt;
+      o.position.z += dz / dist * sp * dt;
+      o.position.y = FC.terrainHeight(o.position.x, o.position.z) + Math.abs(Math.sin(T * 2.2)) * 0.05;
+      o.rotation.y = Math.atan2(dx, dz) + Math.PI / 2;
+      o.rotation.x = 0;
+    }
+  } else if (A.state === 'drinking') {
+    // 低头饮水：脖子前倾用 rotation.x 模拟
+    o.position.y = FC.terrainHeight(o.position.x, o.position.z);
+    o.rotation.x = 0.30 + Math.sin(T * 0.9) * 0.045;
+    if (A.stateT <= 0) {
+      A.state = 'graze';
+      A.stateT = FC.rand(3, 7);
+      o.rotation.x = 0;
     }
   } else {
     // 沿圆环漫步
