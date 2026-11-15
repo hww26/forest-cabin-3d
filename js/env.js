@@ -62,26 +62,34 @@ FC.ENV_PRESETS = {
   },
   dusk: {
     label:'黄昏',
-    skyTop:'#3f4f7e', skyMid:'#b5708a', skyHorizon:'#f2a566',
-    fogColor:'#c9856a', fogDensity:0.020,
-    sunColor:'#ffb066', sunIntensity:2.0, sunElev:7, sunAzi:24,
-    hemiSky:'#f0b58a', hemiGround:'#4a4530', hemiIntensity:0.62,
-    ambColor:'#c98a72', ambIntensity:0.4,
-    rayColor:'#ffb877', rayStrength:1.25, rayOn:true,
-    rain:0, star:0.35, firefly:0.55, exposure:1.05,
-    groundSat:0.92, windX:0.4, windZ:0.15,
-    indoorOn:true, dust:1.25
+    // ⚠️ 旧版问题：太阳强度 2.0 + 硬边暖色 → 光很"冲"，天与光脱节。
+    //    现在整体收柔：太阳压低到 6.5°、强度降到 1.72，靠 hemi/amb/exposure
+    //    把画面补回来；天空改成"蓝紫 → 玫瑰 → 蜜橙"三段式柔和过渡，
+    //    地平线再加一条朝太阳方位展开的宽暖霞，让霞光与天空是一体的。
+    skyTop:'#46578f', skyMid:'#bb8aa2', skyHorizon:'#f7b87c',
+    fogColor:'#d9a184', fogDensity:0.0165,
+    sunColor:'#ffc48a', sunIntensity:1.72, sunElev:6.5, sunAzi:26,
+    hemiSky:'#f4c8a4', hemiGround:'#4f4a34', hemiIntensity:0.70,
+    ambColor:'#d0a08a', ambIntensity:0.44,
+    rayColor:'#ffcf9c', rayStrength:1.05, rayOn:true,
+    rain:0, star:0.30, firefly:0.45, exposure:1.09,
+    groundSat:0.9, windX:0.35, windZ:0.14,
+    indoorOn:true, dust:1.3
   },
   night: {
     label:'夜晚',
-    skyTop:'#070c1a', skyMid:'#111c31', skyHorizon:'#25324a',
-    fogColor:'#141d30', fogDensity:0.026,
-    sunColor:'#8ea6d8', sunIntensity:0.30, sunElev:56, sunAzi:-40,
-    hemiSky:'#22334f', hemiGround:'#0f1714', hemiIntensity:0.22,
-    ambColor:'#1c2740', ambIntensity:0.20,
-    rayColor:'#bcd0f0', rayStrength:0.55, rayOn:true,
-    rain:0, star:1, firefly:1, exposure:1.02,
-    groundSat:0.6, windX:0.24, windZ:0.1,
+    // 夜里把"月光"调得干净清冷一点，配合屋檐/桥上的暖灯形成冷暖对比。
+    // ⚠️ 旧版 amb/hemi 压得太狠（0.20/0.22），夜景几乎全黑、只剩 UI 能看清。
+    //    现在把环境光抬到能看清树影轮廓，再由暖灯"点亮"重点区域，
+    //    形成"暗而不黑、灯火暖亮"的夜色，而不是一片死黑。
+    skyTop:'#080e1e', skyMid:'#13203a', skyHorizon:'#27374f',
+    fogColor:'#16223a', fogDensity:0.018,
+    sunColor:'#a6bcec', sunIntensity:0.46, sunElev:56, sunAzi:-40,
+    hemiSky:'#2f4568', hemiGround:'#151f18', hemiIntensity:0.38,
+    ambColor:'#2b3a56', ambIntensity:0.33,
+    rayColor:'#c3d6f5', rayStrength:0.50, rayOn:true,
+    rain:0, star:1, firefly:0.9, exposure:1.14,
+    groundSat:0.62, windX:0.24, windZ:0.1,
     indoorOn:true, dust:0.85
   }
 };
@@ -138,19 +146,36 @@ FC.Environment = function (scene, renderer) {
       varying vec3 vDir;
       void main(){
         vec3 d = normalize(vDir);
-        float h = clamp(d.y * 1.0, -0.2, 1.0);
-        vec3 col;
-        if(h < 0.24){
-          col = mix(uHoriz, uMid, smoothstep(-0.06, 0.24, h));
-        } else {
-          col = mix(uMid, uTop, smoothstep(0.24, 0.86, h));
-        }
-        // 太阳方向的暖色晕染
+
+        /* 三段式天顶渐变：horizon → mid → zenith
+           ⚠️ 旧版在 h=0.24 处用 if 硬分支 + smoothstep，靠近地平线能看到
+              一条淡淡的"色阶折痕"。这里改成两条 smoothstep 交叉混合，
+              过渡带拉宽到 0.62，并且对地平线以下的 h 做软压平，
+              让天与雾/远山在视觉上连成一片，不再有一条亮线。 */
+        float h = clamp(d.y, -0.32, 1.0);
+        float hU = smoothstep(-0.10, 0.30, h);          // 地平线 → 中天
+        float hV = smoothstep(0.16, 0.90, h);           // 中天 → 天顶
+        vec3 col = mix(uHoriz, uMid, hU);
+        col = mix(col, uTop, hV);
+
+        /* 太阳暖光：近处小核 + 远处大幅羽化，两层叠加才不会"一个圆点挂在天上" */
         float s = max(0.0, dot(d, normalize(uSunDir)));
-        col += uSunCol * pow(s, 7.0) * 0.55 * uSunAmt;
-        col += uSunCol * pow(s, 46.0) * 0.85 * uSunAmt;
-        // 地平线附近轻微增亮
-        col += uHoriz * pow(1.0 - abs(d.y), 9.0) * 0.11;
+        col += uSunCol * pow(s, 3.2)  * 0.30 * uSunAmt;   // 宽幅整体染暖
+        col += uSunCol * pow(s, 9.0)  * 0.42 * uSunAmt;   // 中等扩散
+        col += uSunCol * pow(s, 42.0) * 0.55 * uSunAmt;   // 太阳核心
+
+        /* 地平线霞光带：沿太阳方位横向铺开，把云霞"摊平"在地平线上，
+           这是让光束看起来像从霞光里长出来的关键（而不是凭空戳进天空）。 */
+        vec2 dh = normalize(vec2(d.x, d.z) + 1e-5);
+        vec2 sh = normalize(vec2(uSunDir.x, uSunDir.z) + 1e-5);
+        float az = max(0.0, dot(dh, sh));
+        float band = pow(1.0 - clamp(abs(d.y) * 3.4, 0.0, 1.0), 2.2);
+        col += uSunCol * band * pow(az, 2.2) * 0.30 * uSunAmt;
+
+        /* 地平线整体微亮 + 贴地雾桥：让天空下缘与雾色自然融合 */
+        col += uHoriz * pow(1.0 - clamp(abs(d.y) * 2.0, 0.0, 1.0) + 0.0001, 3.0) * 0.10;
+        col = mix(col, uHoriz, smoothstep(-0.05, -0.30, h) * 0.55);
+
         gl_FragColor = vec4(col, 1.0);
       }`,
     side: three.BackSide,
