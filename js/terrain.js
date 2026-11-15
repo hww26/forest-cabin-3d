@@ -850,7 +850,7 @@ FC.Terrain.prototype.buildBridgeLamps = function () {
 
       // —— 灯泡（自发光球，稍大一圈，远处也能看见）——
       const glassMat = new three.MeshStandardMaterial({
-        color: '#ffe0b0', emissive: new three.Color('#ffb055'), emissiveIntensity: 0,
+        color: '#fff0a8', emissive: new three.Color('#ffd733'), emissiveIntensity: 0,
         roughness: .30, metalness: 0, transparent: true, opacity: .96
       });
       const bulb = new three.Mesh(new three.SphereGeometry(0.072, 8, 6), glassMat);
@@ -859,7 +859,7 @@ FC.Terrain.prototype.buildBridgeLamps = function () {
 
       // —— 光晕 sprite（隔水远看时主要靠它看见灯）——
       const glow = new three.Sprite(new three.SpriteMaterial({
-        map: FC.makeGlowTexture(), color: new three.Color('#ffc274'),
+        map: FC.makeGlowTexture(), color: new three.Color('#ffe066'),
         transparent: true, opacity: 0, blending: three.AdditiveBlending, depthWrite: false
       }));
       glow.scale.set(1.5, 1.5, 1);
@@ -869,7 +869,7 @@ FC.Terrain.prototype.buildBridgeLamps = function () {
       // —— 点光：只给两端两站（共 4 盏），控制场景光源总数 ——
       let light = null;
       if (this.quality !== 'low' && si !== 1) {
-        light = new three.PointLight(new three.Color('#ffbd74'), 0, 6.4, 2.0);
+        light = new three.PointLight(new three.Color('#ffd94f'), 0, 6.4, 2.0);
         light.position.set(s.x, hangY - 0.09, z);
         this.group.add(light);
       }

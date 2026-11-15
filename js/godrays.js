@@ -18,13 +18,16 @@ FC.GodRays = function (scene, opts) {
   // 光源方向（由 main 每帧同步）
   this.dir = new three.Vector3(0.5, 0.42, 0.7).normalize();
   this.color = new three.Color('#ffd9a0');
-  // ⚠️ 光柱的"顶"高度。原来是 42，光柱整体悬在 y≈22~42，
-  //    而相机俯视 y≈1.5 的小屋 —— 光柱全部在画面上方之外，等于没画。
-  //    压到树冠高度附近，让光柱真正落进画面。
-  this.originHeight = 15.5;
-  // ⚠️ 新增：光柱顶端的"融天高度"。光束顶点越接近这个高度，
-  //    越要淡成天空的一部分（而不是一根白棍突然截止）。
-  this.skyBlendH = 20.0;
+  // ⚠️ 用户反馈："光束要柔和一点，而且是从天上射下来的，
+  //    而不是一整块压在屋顶上。"
+  //    根因：黄昏太阳仰角只有 6.5°，光柱若照真实方向铺 26~46m 长，
+  //    就等于一根横躺的粗管子斜跨全场景 → 看着是一块"板"压在屋顶/树冠上；
+  //    而且原顶端只到 y≈15.5（刚好屋顶高度），根本没有"从天上"的感觉。
+  //    现在改为：光柱根部落在林间地面，顶端推到接近天穹的高度，
+  //    并给射向一个最小仰角，让它始终是"从高空斜射下来的一束"。
+  this.skyTop = 27.0;              // 光柱顶端高度（树冠之上、接近天穹）
+  this.minElev = 0.62;             // 射向 y 分量下限（≈38°）→ 不再横躺
+  this.rayDir = new three.Vector3(0.4, 0.7, 0.5).normalize();
 
   /* ---------------- ① 太阳辉光 ----------------
      ⚠️ 旧版辉光 56×56、opacity 0.9+，是个很扎眼的"白盘子"，
@@ -59,15 +62,24 @@ FC.GodRays = function (scene, opts) {
       uColor:     { value: new three.Color('#ffd9a0') },
       uIntensity: { value: 1 },
       uTime:      { value: 0 },
-      uOpacity:   { value: 1 }
+      uOpacity:   { value: 1 },
+      uSunDir:    { value: new three.Vector3(0.4, 0.7, 0.5).normalize() },
+      // ⚠️ ShaderMaterial 不会自动吃场景雾 → 远处光柱和近处一样亮，
+      //    在屏幕上就是"贴上去的一块板"。这里手动按深度做吸收衰减。
+      uFogK:      { value: 0.014 }
     },
     vertexShader: `
       varying vec2 vUv;
       varying vec3 vWorld;
+      varying vec3 vNrm;
+      varying vec3 vView;
       void main(){
         vUv = uv;
         vec4 wp = modelMatrix * vec4(position,1.0);
         vWorld = wp.xyz;
+        vNrm = normalize(mat3(modelMatrix) * normal);
+        // 视线方向：用于按"视线穿过光柱的厚度"算亮度
+        vView = normalize(cameraPosition - wp.xyz);
         gl_Position = projectionMatrix * viewMatrix * wp;
       }`,
     fragmentShader: `
@@ -75,8 +87,12 @@ FC.GodRays = function (scene, opts) {
       uniform float uIntensity;
       uniform float uTime;
       uniform float uOpacity;
+      uniform float uFogK;
+      uniform vec3  uSunDir;
       varying vec2 vUv;
       varying vec3 vWorld;
+      varying vec3 vNrm;
+      varying vec3 vView;
 
       // 简易噪声，让光柱边缘有流动的絮状感
       float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
@@ -87,27 +103,48 @@ FC.GodRays = function (scene, opts) {
                    mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y);
       }
       void main(){
-        // 横向：中间亮、两侧大幅羽化（边缘更软 → 不像一块硬塑料片）
-        float ex = smoothstep(0.0, 0.52, vUv.x) * smoothstep(1.0, 0.48, vUv.x);
-        ex = pow(ex, 1.25);
+        /* ⚠️ 关键修正（用户："不是一整块压在屋顶上"）。
+           旧版只在 vUv.x（圆柱周长）上做羽化，而圆柱的周长在屏幕上
+           就是那个矩形投影的左右两边 —— 于是整个矩形几乎等亮，
+           画出来就是"一块灰白的板"压在屋顶/树冠上。
+           现在改成按真实几何算"视线穿过这根光柱的厚度"：
+             厚度 ∝ sqrt(1 - (N·V)^2)
+           正中央（视线垂直于柱面）最厚最亮，越到柱体轮廓越薄直到 0。
+           这样光柱在屏幕上是一根"中间实、两侧自然融掉"的圆柱光，
+           而不是一块平面板。 */
+        float ndv = abs(dot(normalize(vNrm), normalize(vView)));
+        float thick = sqrt(max(0.0, 1.0 - ndv * ndv));
+        thick = pow(thick, 0.92);
 
-        /* 纵向：不再是"顶端最亮、底部消散"的硬截止。
-           ⚠️ 旧版 ey = pow(vUv.y, 1.65) 让光束顶端（vUv.y=1）最亮，
-              于是每根光柱的头顶都是一条明亮的切口，看上去像插在天空里的白棍。
-           现在改成"中上段最亮、顶端渐隐入天、底端柔和消散"的钟形：
-           顶端 0.68→1.0 淡出，于是光束与天空是连起来的。 */
+        // 纵向：从天上垂下来的一缕。顶端渐隐入天、底端柔和消散。
+        // ⚠️ 底部 fade 从 0.20 放宽到 0.34 —— 否则能看见圆柱底面那圈硬边
+        //    （用户："不要那么突兀"）。现在根部是慢慢化进空气里的。
         float y  = clamp(vUv.y, 0.0, 1.0);
-        float ey = smoothstep(0.0, 0.34, y) * (1.0 - smoothstep(0.66, 1.0, y));
-        ey = pow(max(ey, 0.0), 1.15);
+        float ey = smoothstep(0.0, 0.34, y) * (1.0 - smoothstep(0.52, 1.0, y));
+        ey = pow(max(ey, 0.0), 1.05);
 
         // 流动絮状：横向更密（细丝感），纵向拉长（从天垂下的光缕）
-        float n1 = noise(vec2(vUv.x * 6.2, vUv.y * 1.15 - uTime * 0.055));
-        float n2 = noise(vec2(vUv.x * 2.4 + 11.0, vUv.y * 0.55 - uTime * 0.031));
-        float n = 0.55 * n1 + 0.45 * n2;
-        n = 0.56 + 0.44 * n;
+        float n1 = noise(vec2(vUv.x * 5.0, vUv.y * 1.05 - uTime * 0.05));
+        float n2 = noise(vec2(vUv.x * 2.0 + 11.0, vUv.y * 0.5 - uTime * 0.028));
+        float n = 0.58 * n1 + 0.42 * n2;
+        n = 0.62 + 0.38 * n;
 
-        float a = ex * ey * n * uIntensity * uOpacity;
-        if(a < 0.003) discard;
+        float a = thick * ey * n * uIntensity * uOpacity;
+        // 深度衰减：越远越淡 → 光柱自然融进远处的树林与雾里
+        float dist = length(vWorld - cameraPosition);
+        a *= exp(-dist * uFogK);
+        /* ⚠️ "从天上射下来"的关键：贴脸的光柱必须淡出。
+           加色混合下，一根从地面伸到天穹的粗光柱若贴着镜头，
+           就会糊满整个画面（看着就是一大块亮面）。
+           这里用两层约束：
+             ① 绝对近距淡出：<7m 快速溶解
+             ② 方向约束：光柱越偏离太阳方向越淡 —— 只有朝太阳那侧的
+                光柱才亮，于是屏幕上呈现"光从太阳那头斜射下来"的透视感 */
+        a *= smoothstep(2.0, 9.0, dist);
+        vec3 toFrag = normalize(vWorld - cameraPosition);
+        float align = dot(toFrag, normalize(uSunDir));
+        a *= mix(0.30, 1.0, clamp(align * 0.5 + 0.5, 0.0, 1.0));
+        if(a < 0.0025) discard;
         gl_FragColor = vec4(uColor, a);
       }`,
     transparent: true,
@@ -116,11 +153,12 @@ FC.GodRays = function (scene, opts) {
     side: three.DoubleSide
   });
 
-  /* 光柱几何：被拉长的锥体（上宽下窄），斜射进林间空地
-     ⚠️ 旧版长度 15~26、顶端固定在 y=15.5，光束在画面里就是"悬空的一截"，
-        既够不到天、又扎不进地，看着很突兀。
-        现在把光束顶推到 y≈24（树冠之上、接近天穹），长度拉到 26~46，
-        配合着色器顶端的渐隐，光束看起来是"从天上垂下来"的。 */
+  /* 光柱几何：细长圆柱（上下略收），从高空斜射下来
+     ⚠️ 旧版长度 26~46、顶端固定 y=15.5 → 光束要么横躺成"板"，
+        要么悬在半空。现在改为：
+        长度 24~40，顶端推到 y≈skyTop(27) 附近（树冠之上、接近天穹），
+        根部落在林间地面（update 里锚定 base 点），
+        配合着色器顶端渐隐，光柱看起来是"从天穹垂到地上"的一束光。 */
   this.shafts = [];
   const N = 16;
   for (let i = 0; i < N; i++) {
@@ -128,9 +166,9 @@ FC.GodRays = function (scene, opts) {
     // 避免落到 z≈-24 的池塘上空空荡荡
     const ang = -0.35 + (i / (N - 1)) * 1.5 + (Math.random() - 0.5) * 0.22;
     const rad = FC.rand(6, 20);
-    const topW = FC.rand(3.4, 7.4);      // 顶端宽度
-    const len  = FC.rand(26, 46);        // 长度：足够从天上垂到林间
-    const geo = new three.CylinderGeometry(topW, topW * 0.26, len, 7, 1, true);
+    const topW = FC.rand(2.6, 5.6);      // 顶端宽度（略收，更柔不生硬）
+    const len  = FC.rand(24, 40);        // 长度：从天上垂到林间
+    const geo = new three.CylinderGeometry(topW * 0.92, topW * 0.34, len, 9, 1, true);
     // 打开 UV 纵向铺满
     const uv = geo.attributes.uv;
     for (let k = 0; k < uv.count; k++) uv.setY(k, uv.getY(k));
@@ -147,8 +185,9 @@ FC.GodRays = function (scene, opts) {
       topW,
       swing: FC.rand(0, Math.PI * 2),
       speed: FC.rand(0.05, 0.16),
-      baseOpacity: FC.rand(0.52, 1.0),
-      yOff: FC.rand(-2.5, 4.0)
+      // ⚠️ 亮度整体收柔：用户要"柔和一点"，所以基准不透明度往下压
+      baseOpacity: FC.rand(0.26, 0.55),
+      yOff: FC.rand(-1.5, 2.5)
     };
     this.shafts.push(sh);
     this.group.add(mesh);
@@ -252,13 +291,29 @@ FC.GodRays.prototype = {
     const three = FC.THREE;
     this.dir.copy(sunDir).normalize();
 
+    /* ⚠️ 用户："光束是从天上射下来的，而不是一整块压在屋顶上。"
+       如果直接照真实太阳方向铺光柱，黄昏（仰角 6.5°）时太阳几乎是
+       贴着地平线的，光柱就会横躺成一块板。
+       所以这里给光束单独算一个"永远保有仰角"的射向：
+         · 保持太阳的方位角（光从哪边来不变）
+         · 但把仰角抬到至少 ≈38°
+       这样无论天气如何，光束都是"从高空斜斜射下"的一束。 */
+    const az = Math.atan2(this.dir.z, this.dir.x);
+    const elev = Math.max(this.minElev, Math.abs(this.dir.y) * 0.6 + this.minElev * 0.7);
+    const ce = Math.cos(elev);
+    this.rayDir.set(Math.cos(az) * ce, Math.sin(elev), Math.sin(az) * ce).normalize();
+    const dir = this.rayDir;
+
     this.intensity = FC.damp(this.intensity, this.targetIntensity * (this.enabled ? 1 : 0), 2.2, dt);
     const I = this.intensity;
 
     this.shaftMat.uniforms.uTime.value = this.time;
     this.shaftMat.uniforms.uIntensity.value = I;
+    // 光柱"朝向太阳方向才亮"用真实太阳方向（不是被打抬的 rayDir），
+    // 这样光束的透视收敛点正好落在天上那个太阳辉光上。
+    this.shaftMat.uniforms.uSunDir.value.copy(this.dir);
     this.dustMat.uniforms.uTime.value = this.time;
-    this.dustMat.uniforms.uIntensity.value = 0.42 + I * 0.62;
+    this.dustMat.uniforms.uIntensity.value = 0.38 + I * 0.55;
     this.dustMat.uniforms.uLightDir.value.copy(this.dir);
     // 太阳位置：沿光方向推到很远处。辉光比光柱更远一档，
     // 让"太阳"落在天穹上，光柱从它下方垂进林中 —— 眼感上是一体的。
@@ -266,17 +321,19 @@ FC.GodRays.prototype = {
     this.sunHalo.position.copy(this.dir).multiplyScalar(sunDist - 3);
     this.sunGlow.position.copy(this.dir).multiplyScalar(sunDist);
     this.sunCore.position.copy(this.dir).multiplyScalar(sunDist + 0.6);
-    this.sunHalo.material.opacity = (0.10 + I * 0.36) * this.mood;
-    this.sunGlow.material.opacity = (0.16 + I * 0.42) * this.mood;
-    this.sunCore.material.opacity = (0.10 + I * 0.34) * this.mood;
+    // ⚠️ 太阳辉光整体收柔：用户要"柔和一点"，所以核心亮度也压下来
+    this.sunHalo.material.opacity = (0.07 + I * 0.26) * this.mood;
+    this.sunGlow.material.opacity = (0.11 + I * 0.30) * this.mood;
+    this.sunCore.material.opacity = (0.07 + I * 0.24) * this.mood;
     const gs = 52 + I * 30;
     this.sunGlow.scale.set(gs, gs, 1);
     this.sunHalo.scale.set(150 + I * 90, 150 + I * 90, 1);
     this.sunCore.scale.set(14 + I * 9, 14 + I * 9, 1);
 
-    /* 每根光柱：位置环绕中心，旋转对齐光方向 */
+    /* 每根光柱：根部锚在林间地面，顶端沿射向伸向天穹
+       （不再"以顶端为锚往下垂" —— 那正是"整块压在屋顶上"的观感来源） */
     const up = new three.Vector3(0, 1, 0);
-    const q = new three.Quaternion().setFromUnitVectors(up, this.dir);
+    const q = new three.Quaternion().setFromUnitVectors(up, dir);
     this.shafts.forEach((sh, i) => {
       // 摆动幅度收小（0.10→0.055），慢一点 → 更像自然空气流动，不"甩"
       const sw = Math.sin(this.time * sh.speed + sh.swing);
@@ -285,15 +342,17 @@ FC.GodRays.prototype = {
       const cx = Math.cos(a) * rad;
       const cz = Math.sin(a) * rad;
 
-      // 光柱中点：顶端挂在高处，沿光方向往下垂
-      const top = new THREE.Vector3(cx, this.originHeight + sh.yOff, cz);
-      const mid = new THREE.Vector3().copy(top).addScaledVector(this.dir, -sh.len * 0.5);
+      // 根部：落在林间地面（略高于地，避免穿地）
+      const baseY = 0.6 + Math.max(0, sh.yOff) * 0.4;
+      const base = new three.Vector3(cx, baseY, cz);
+      // 中点 = 根部 + 射向 × 半长 → 整根柱子向上方天空延伸
+      const mid = new three.Vector3().copy(base).addScaledVector(dir, sh.len * 0.5);
       sh.mesh.position.copy(mid);
       sh.mesh.quaternion.copy(q);
 
       // 当镜头贴近时淡出，避免糊脸（范围放宽，过渡更软）
       const d = camera.position.distanceTo(mid);
-      const near = FC.clamp((d - 3.0) / 6.5, 0, 1);
+      const near = FC.clamp((d - 3.5) / 8.0, 0, 1);
       const nearS = near * near * (3 - 2 * near);          // 再平滑一次
       const breathe = 0.90 + 0.10 * Math.sin(this.time * 0.55 + i * 1.3);
       const vis = I * sh.baseOpacity * nearS * breathe * this.mood * (sh.allow === false ? 0 : 1);
@@ -301,6 +360,7 @@ FC.GodRays.prototype = {
       sh.mat.uniforms.uTime.value = this.time;
       sh.mat.uniforms.uIntensity.value = vis;
       sh.mat.uniforms.uColor.value.copy(this.shaftMat.uniforms.uColor.value);
+      sh.mat.uniforms.uSunDir.value.copy(this.dir);
       sh.mesh.visible = vis > 0.02;
       sh.mesh.scale.set(1.0, 1.0, 1.0);
     });

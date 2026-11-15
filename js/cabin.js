@@ -450,7 +450,9 @@ FC.Cabin.prototype.buildExterior = function () {
   this.lanternGlass = new three.Mesh(
     new three.CylinderGeometry(0.098, 0.12, 0.22, 6, 1, true),
     new three.MeshStandardMaterial({
-      color: '#ffcf88', emissive: new THREE.Color('#ffb347'), emissiveIntensity: 0,
+      // ⚠️ 用户要求：夜/雨/雾时檐下挂灯是"黄色"的。
+      //    原来是 #ffb347（偏橙），现改到色相 ≈46° 的金黄，一眼就是黄色灯。
+      color: '#ffeaa6', emissive: new THREE.Color('#ffd633'), emissiveIntensity: 0,
       roughness: .3, metalness: 0, transparent: true, opacity: .88, side: three.DoubleSide
     })
   );
@@ -458,7 +460,7 @@ FC.Cabin.prototype.buildExterior = function () {
   lanternG.add(this.lanternGlass);
 
   this.lanternGlow = new three.Sprite(new three.SpriteMaterial({
-    map: FC.makeGlowTexture(), color: new THREE.Color('#ffc070'),
+    map: FC.makeGlowTexture(), color: new THREE.Color('#ffe066'),
     transparent: true, opacity: 0, blending: three.AdditiveBlending, depthWrite: false
   }));
   this.lanternGlow.scale.set(1.9, 1.9, 1);
@@ -483,9 +485,9 @@ FC.Cabin.prototype.buildExterior = function () {
     const lm2 = new three.Mesh(FC.mergeGeos([rod, ecap]), FC.matVertex({ rough: .8 }));
     lm2.castShadow = true;
     lg.add(lm2);
-    // 灯泡（夜里自发光）
+    // 灯泡（夜里自发光）—— 用户要求：夜/雨/雾时檐下挂灯是"黄色"
     const glassMat = new three.MeshStandardMaterial({
-      color: '#ffd9a0', emissive: new three.Color('#ffb95e'), emissiveIntensity: 0,
+      color: '#fff0a8', emissive: new three.Color('#ffd733'), emissiveIntensity: 0,
       roughness: .35, metalness: 0
     });
     const bulb = new three.Mesh(new three.SphereGeometry(0.075, 8, 6), glassMat);
@@ -493,16 +495,16 @@ FC.Cabin.prototype.buildExterior = function () {
     lg.add(bulb);
     // 光晕
     const glow = new three.Sprite(new three.SpriteMaterial({
-      map: FC.makeGlowTexture(), color: new three.Color('#ffc070'),
+      map: FC.makeGlowTexture(), color: new three.Color('#ffe066'),
       transparent: true, opacity: 0, blending: three.AdditiveBlending, depthWrite: false
     }));
     glow.scale.set(1.15, 1.15, 1);
     glow.position.y = -0.30;
     lg.add(glow);
-    // 点光（低画质不加，省性能）
+    // 点光（低画质不加，省性能）—— 黄色点光
     let light = null;
     if (withLight) {
-      light = new three.PointLight(new three.Color('#ffb870'), 0, 4.6, 2.0);
+      light = new three.PointLight(new three.Color('#ffd94f'), 0, 4.6, 2.0);
       light.position.y = -0.34;
       light.castShadow = false;
       lg.add(light);
@@ -1187,8 +1189,8 @@ FC.Cabin.prototype.buildLights = function () {
   this.nightLight.position.set(this.W - 0.66, 0.06 + 0.78, -1.92);
   this.group.add(this.nightLight);
 
-  // 门口提灯光
-  this.doorLight = new three.PointLight(new three.Color('#ffb870'), 0, 5.0, 2.0);
+  // 门口提灯光 —— 黄色（与挂灯一致）
+  this.doorLight = new three.PointLight(new three.Color('#ffd94f'), 0, 5.0, 2.0);
   this.doorLight.position.set(1.62, 2.60, this.D + 0.35);
   this.group.add(this.doorLight);
 
