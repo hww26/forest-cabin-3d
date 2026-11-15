@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="WAMhvwG26w9Rc8KTh0nkvm">
+<head data-page-node-id="yDvCFhJdUG0MYvHugc6bWD">
+<meta charset="UTF-8" data-page-node-id="SnEmMUo86sSNQGuwO8Sy9q" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" data-page-node-id="PKNigf3wCZRJF6z9Dgm9Z6" />
+<title>林间小屋 · Forest Cabin</title>
+<style>
+  :root{
+    --amber:#ffb347;
+    --amber-dim:#c98a3c;
+    --ink:#f4efe6;
+    --panel:rgba(18,20,18,.55);
+    --panel-strong:rgba(14,16,14,.78);
+    --line:rgba(255,255,255,.14);
+    --shadow:0 8px 28px rgba(0,0,0,.42);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0a0d0b;}
+  body{
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei","Noto Sans CJK SC",system-ui,sans-serif;
+    color:var(--ink);
+    user-select:none;
+  }
+  #app{position:fixed;inset:0;}
+  canvas{display:block;width:100%;height:100%;}
+
+  /* ---------- 载入 ---------- */
+  #loader{
+    position:fixed;inset:0;z-index:60;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;
+    background:radial-gradient(circle at 50% 42%,#1c2a1c 0%,#0a0d0b 72%);
+    transition:opacity .7s ease,visibility .7s;
+  }
+  #loader.done{opacity:0;visibility:hidden;}
+  .ld-title{font-size:26px;letter-spacing:.42em;font-weight:600;color:#f0e2c8;text-indent:.42em;}
+  .ld-sub{font-size:11px;letter-spacing:.3em;color:rgba(240,226,200,.42);text-transform:uppercase;}
+  .ld-bar{width:230px;height:2px;background:rgba(255,255,255,.12);border-radius:2px;overflow:hidden;}
+  .ld-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--amber-dim),var(--amber));transition:width .32s ease;}
+  .ld-pct{font-size:11px;letter-spacing:.18em;color:rgba(255,255,255,.45);font-variant-numeric:tabular-nums;}
+
+  /* ---------- 通用面板 ---------- */
+  .glass{
+    background:var(--panel);
+    backdrop-filter:blur(14px) saturate(1.25);
+    -webkit-backdrop-filter:blur(14px) saturate(1.25);
+    border:1px solid var(--line);
+    border-radius:14px;
+    box-shadow:var(--shadow);
+  }
+  #ui{position:fixed;inset:0;z-index:20;pointer-events:none;}
+  #ui > *{pointer-events:auto;}
+
+  /* ---------- 标题 ---------- */
+  #brand{
+    position:absolute;left:20px;top:20px;padding:12px 20px 12px 18px;
+    display:flex;align-items:center;gap:13px;
+  }
+  #brand .seal{
+    width:30px;height:30px;border-radius:9px;flex:0 0 auto;
+    background:linear-gradient(150deg,#4d7a3a,#2c4a24);
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
+  }
+  #brand .seal svg{width:18px;height:18px;}
+  #brand h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.2em;text-indent:.2em;}
+  #brand p{margin:3px 0 0;font-size:9.5px;letter-spacing:.24em;color:rgba(255,255,255,.45);text-transform:uppercase;}
+
+  /* ---------- 天气 ---------- */
+  #weather{
+    position:absolute;left:50%;top:20px;transform:translateX(-50%);
+    display:flex;gap:5px;padding:6px;
+  }
+  .wbtn{
+    border:0;background:transparent;color:rgba(255,255,255,.62);
+    font-family:inherit;font-size:12.5px;letter-spacing:.1em;
+    padding:8px 15px;border-radius:10px;cursor:pointer;
+    display:flex;align-items:center;gap:7px;
+    transition:background .25s,color .25s,transform .18s;
+    white-space:nowrap;
+  }
+  .wbtn svg{width:15px;height:15px;opacity:.85;}
+  .wbtn:hover{color:#fff;background:rgba(255,255,255,.08);}
+  .wbtn.on{color:#1a1408;background:linear-gradient(180deg,#ffc568,#e8a13c);font-weight:600;box-shadow:0 3px 12px rgba(255,170,60,.32);}
+  .wbtn.on svg{opacity:1;}
+
+  /* ---------- 右侧控制 ---------- */
+  #controls{
+    position:absolute;right:20px;top:20px;width:214px;padding:14px;
+    display:flex;flex-direction:column;gap:13px;
+    max-height:calc(100vh - 40px);overflow-y:auto;
+  }
+  #controls::-webkit-scrollbar{width:4px;}
+  #controls::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:4px;}
+  .grp-title{font-size:9.5px;letter-spacing:.22em;color:rgba(255,255,255,.36);text-transform:uppercase;}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .row .lbl{font-size:12.5px;letter-spacing:.06em;color:rgba(255,255,255,.84);}
+  .row .lbl small{display:block;font-size:9.5px;letter-spacing:.05em;color:rgba(255,255,255,.34);margin-top:2px;}
+  .sw{width:40px;height:22px;border-radius:11px;background:rgba(255,255,255,.14);position:relative;cursor:pointer;flex:0 0 auto;transition:background .3s;}
+  .sw::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .3s cubic-bezier(.3,1.4,.5,1);}
+  .sw.on{background:linear-gradient(90deg,var(--amber-dim),var(--amber));}
+  .sw.on::after{transform:translateX(18px);}
+  .act{
+    width:100%;border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.05);
+    color:rgba(255,255,255,.88);font-family:inherit;font-size:12.5px;letter-spacing:.1em;
+    padding:10px;border-radius:10px;cursor:pointer;text-align:center;
+    transition:background .22s,color .22s,border-color .22s;
+  }
+  .act:hover{background:rgba(255,255,255,.12);color:#fff;}
+  .act.primary{background:linear-gradient(180deg,#ffc568,#e5a03c);color:#1a1408;font-weight:600;border-color:transparent;}
+  .act.primary:hover{filter:brightness(1.07);}
+  .seg{display:flex;gap:4px;background:rgba(0,0,0,.28);padding:3px;border-radius:10px;}
+  .seg button{
+    flex:1;border:0;background:transparent;color:rgba(255,255,255,.55);
+    font-family:inherit;font-size:11.5px;padding:6px 0;border-radius:7px;cursor:pointer;transition:.22s;
+  }
+  .seg button.on{background:rgba(255,255,255,.9);color:#171512;font-weight:600;}
+  .divider{height:1px;background:rgba(255,255,255,.09);}
+
+  /* ---------- 底部提示 ---------- */
+  #hint{
+    position:absolute;left:50%;bottom:20px;transform:translateX(-50%);
+    padding:9px 18px;font-size:11.5px;letter-spacing:.1em;color:rgba(255,255,255,.58);
+    display:flex;align-items:center;gap:14px;white-space:nowrap;
+  }
+  #hint b{color:var(--amber);font-weight:500;}
+  #hint .sp{width:1px;height:11px;background:rgba(255,255,255,.16);}
+
+  /* ---------- 状态 ---------- */
+  #stats{
+    position:absolute;right:20px;bottom:20px;padding:7px 13px;
+    font-size:10.5px;letter-spacing:.1em;color:rgba(255,255,255,.5);
+    font-variant-numeric:tabular-nums;display:flex;gap:12px;align-items:center;
+  }
+  #stats span b{color:rgba(255,255,255,.82);font-weight:500;}
+
+  /* ---------- 室内提示 / 交互热点 ---------- */
+  #zone{
+    position:absolute;left:50%;bottom:74px;transform:translateX(-50%) translateY(14px);
+    padding:9px 20px;font-size:12.5px;letter-spacing:.12em;
+    opacity:0;transition:opacity .3s,transform .3s;pointer-events:none;
+    background:var(--panel-strong);border:1px solid rgba(255,200,120,.28);border-radius:12px;
+  }
+  #zone.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ---------- 提示气泡 ---------- */
+  #toast{
+    position:absolute;left:50%;top:82px;transform:translateX(-50%) translateY(-10px);
+    padding:9px 18px;font-size:12px;letter-spacing:.1em;border-radius:10px;
+    background:var(--panel-strong);border:1px solid var(--line);
+    opacity:0;transition:opacity .35s,transform .35s;pointer-events:none;
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+
+  /* ---------- 快捷键面板 ---------- */
+  #keys{
+    position:absolute;left:20px;bottom:20px;padding:12px 15px;font-size:11px;
+    letter-spacing:.06em;color:rgba(255,255,255,.5);line-height:1.85;display:none;
+  }
+  #keys.show{display:block;}
+  #keys kbd{
+    background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.14);
+    border-radius:4px;padding:1px 5px;font-family:inherit;font-size:10px;color:rgba(255,255,255,.78);
+  }
+
+  /* ---------- 全屏 / 移动端 ---------- */
+  @media (max-width:820px){
+    #brand{padding:9px 14px;left:12px;top:12px;}
+    #brand h1{font-size:13.5px;}
+    #brand p{display:none;}
+    #weather{top:auto;bottom:66px;left:12px;right:12px;transform:none;overflow-x:auto;justify-content:flex-start;}
+    #weather::-webkit-scrollbar{display:none;}
+    .wbtn{padding:7px 11px;font-size:11.5px;}
+    #controls{right:12px;top:12px;width:52px;padding:8px;gap:8px;max-height:calc(100vh - 24px);}
+    #controls .lbl,#controls .grp-title,#controls .act span{display:none;}
+    #controls .act{padding:9px 0;font-size:15px;letter-spacing:0;}
+    #controls .sw{transform:scale(.86);}
+    #controls .row{justify-content:center;}
+    #controls .seg{flex-direction:column;}
+    #hint{display:none;}
+    #stats{right:12px;bottom:12px;font-size:9.5px;}
+    #keys{display:none !important;}
+  }
+</style>
+</head>
+<body data-page-node-id="1u3M8MmIA1y6GwUxro3xJk">
+<div id="app" data-page-node-id="Rx5HympNOwBdwdzAnrFDoZ"></div>
+
+<!-- ===================== 载入层 ===================== -->
+<div id="loader" data-page-node-id="vC16QYihvTDB0OWWFjT9BX">
+  <div class="ld-title" data-page-node-id="OulaQ6UVsHEblrClEkydV2">林间小屋</div>
+  <div class="ld-sub" data-page-node-id="Cb2MxQ2XQVc5AHcB73Ebnx">Forest&nbsp;Cabin&nbsp;·&nbsp;Interactive&nbsp;Scene</div>
+  <div class="ld-bar" data-page-node-id="hdXxPTDuFL94DCA6Nx3jdU"><div class="ld-fill" id="ldFill" data-page-node-id="CWZm06YeYh9xoDilHopgIs"></div></div>
+  <div class="ld-pct" id="ldPct" data-page-node-id="b6qnC4GadDKFDD5AY6qC28">0%</div>
+</div>
+
+<!-- ===================== UI ===================== -->
+<div id="ui" data-page-node-id="htFxELIkhgxfmoinzmFNAG">
+  <div id="brand" class="glass" data-page-node-id="Dnlj3ZHf02eBGt7czfm49C">
+    <div class="seal" data-page-node-id="0XiHG6PvFJq74v268wSIlF">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#f2e6cc" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="hHFFteDjEAJVutfEsQwZua">
+        <path d="M3 11l9-7 9 7" data-page-node-id="Gcoy8S1hiXbgJxZ6w2DVFB"/><path d="M5 10.5V20h14v-9.5" data-page-node-id="HpYiW7dppzLgddWnRjdi3L"/><path d="M10 20v-5h4v5" data-page-node-id="7WgYzffXdClfR6bfS8BKXU"/>
+      </svg>
+    </div>
+    <div data-page-node-id="Ylp25mxMfKIoVn0PX9UlG4">
+      <h1 data-page-node-id="PcsVoek8E7lKlb1u97ktBl">林间小屋</h1>
+      <p data-page-node-id="PPTcsDnmciXSEcuuxrAuYE">Romanced&nbsp;in&nbsp;the&nbsp;woods</p>
+    </div>
+  </div>
+
+  <div id="weather" class="glass" data-page-node-id="qOTNZ9CXeXBewQtuCejJ4b"></div>
+
+  <div id="controls" class="glass" data-page-node-id="Pdvh9NmZ9dQG7rTTGZThkc">
+    <div class="grp-title" data-page-node-id="oA2rSv0SneFWdbmgDGX4f1">光照氛围</div>
+    <div class="row" data-page-node-id="OTZiLas4e0tWQU2FIYz8kW">
+      <div class="lbl" data-page-node-id="hSeaNUScwtX1obsTvNDWPb">丁达尔光束<small data-page-node-id="pei9D47zf64m8pOtE6vsB5">体积光强度</small></div>
+      <div class="sw on" id="swRays" data-page-node-id="fafmJobbvIrj27kFvkIxBh"></div>
+    </div>
+    <div class="row" data-page-node-id="5EMn9j652VNuFR9CtfbwhK">
+      <div class="lbl" data-page-node-id="5FkxMxZG4JRt42k7y8Dwdh">室内灯光<small data-page-node-id="K6faGjuwKFk7tG4CZuXNOB">台灯 / 吊灯 / 壁炉</small></div>
+      <div class="sw" id="swLamp" data-page-node-id="zDyts2Pnas41v00zCOYPAU"></div>
+    </div>
+    <div class="divider" data-page-node-id="UdjGrKAUVEdUVS50mUNoet"></div>
+
+    <div class="grp-title" data-page-node-id="BlsRNIStLdE5qCiIuUOP8f">视角</div>
+    <button class="act primary" id="btnEnter" data-page-node-id="ferHk4XBunIQ1JNuXWMcFA"><span data-page-node-id="ppNxp3jPCZAYWwnIc8hNfg">进入小屋</span></button>
+    <button class="act" id="btnTour" data-page-node-id="nYGxTjnhzXTSpHDErCoCZi"><span data-page-node-id="9atk9zvQsfgxsraoybKD3e">自动巡游</span></button>
+    <div class="row" data-page-node-id="8PlsszLQq85UA8Np5o5fby">
+      <div class="lbl" data-page-node-id="EeoCDyGdzZaVQuM7WbWpRO">画质</div>
+    </div>
+    <div class="seg" id="segQuality" data-page-node-id="GUUqRtiJwNnex74byGgCZ4">
+      <button data-q="low" data-page-node-id="gzXNTpy7C7qdodWP6ZfzH1">低</button>
+      <button data-q="mid" class="on" data-page-node-id="N5NY7qYcUuMT5Kf42vvxsY">中</button>
+      <button data-q="high" data-page-node-id="UKtfEL221f0OlTIqGQS7eU">高</button>
+    </div>
+    <div class="divider" data-page-node-id="Z0O4bAwrPMtVwB4wdFYHZr"></div>
+
+    <div class="row" data-page-node-id="ke53z07uUEhSQ1sAIFLrXF">
+      <div class="lbl" data-page-node-id="jPqkswkAKDFcKseatScEB6">环境音效<small data-page-node-id="eFjIK2kRTorqIQs2WmuliB">风 · 雨 · 炉火</small></div>
+      <div class="sw" id="swAudio" data-page-node-id="WIYRzIlHzrRChPD8EUpH9r"></div>
+    </div>
+    <button class="act" id="btnShot" data-page-node-id="DhL1ojxXKLjSjGXaemqA0y"><span data-page-node-id="Xe5EHucbWanahvTwIRE6sZ">拍 照</span></button>
+    <button class="act" id="btnKeys" data-page-node-id="BLBjqyyC0IaJ6Vk3GTFB1J"><span data-page-node-id="Qpp0BSOp4ZQr76rm7v34lo">快捷键</span></button>
+  </div>
+
+  <div id="hint" class="glass" data-page-node-id="SFtIRzPelzikIh8TaCfbDD">
+    <span data-page-node-id="K8tYo7B8liD3kMYw8gjUSZ"><b data-page-node-id="TM2XKZiQqhmwEdUWKN6GqE">左键</b> 旋转</span><span class="sp" data-page-node-id="sY0A4mEpXLO18kQE4Cy6W2"></span>
+    <span data-page-node-id="wrAfJCtcbzsGtiVWTMICBr"><b data-page-node-id="n5cjy4q7jd7QH10GJunGPt">滚轮</b> 缩放</span><span class="sp" data-page-node-id="HuFTXVvtLKEHHIEdyonPbS"></span>
+    <span data-page-node-id="abpL5qcUcwNOUkAANlKFN8"><b data-page-node-id="Gjd8B45q1hHNsmGpGpGCRH">右键</b> 平移</span><span class="sp" data-page-node-id="nnD9zklAGFxjUxCKMJIMeO"></span>
+    <span data-page-node-id="zsuENTFlRpl9tiCE4SbsS7"><b data-page-node-id="aJLVx5ldquEQN8uS7SheuV">点击小屋</b> 进入</span>
+  </div>
+
+  <div id="stats" class="glass" data-page-node-id="pXmdgABUuJHdE801zxrfbx">
+    <span data-page-node-id="XBUsAyi8eBOCx6P4NLIeP5"><b id="sFps" data-page-node-id="A3mhy5aPMTrxMQ2s6SFJL2">--</b> FPS</span>
+    <span id="sScene" data-page-node-id="rXZJ6RFY8kka764UnFjFs1">—</span>
+    <span id="sTime" data-page-node-id="OG7c57CHNpth5253lIlb84">—</span>
+  </div>
+
+  <div id="keys" class="glass" data-page-node-id="WPXhimmOxB6cJQB8TXds79">
+    <div data-page-node-id="ifyUeGbKIVzorGSJ8NVpcz"><kbd data-page-node-id="LS0HZdCZaHhuJcTubYJuMS">1</kbd>~<kbd data-page-node-id="PEVD9C2RqEqvnHBtqqgMq1">5</kbd> 切换天气　<kbd data-page-node-id="83l5YCT80FmmAvV4OaeWjA">L</kbd> 室内灯　<kbd data-page-node-id="qwMunsfzPzE82zFueMPCH2">E</kbd> 进入/离开</div>
+    <div data-page-node-id="P8e1bRG0DTMxhhb7mRXbsT"><kbd data-page-node-id="1yGdCgGCqV1FMBcCRAATVM">R</kbd> 光束开关　<kbd data-page-node-id="Uob8PHW9Mr8DQcDjC8F7WA">T</kbd> 自动巡游　<kbd data-page-node-id="ZwqW6G8uKPgRDG7jiYKGNP">C</kbd> 视角复位　<kbd data-page-node-id="B3wsSiZSEFKkSQ1jEB6iwO">P</kbd> 拍照</div>
+  </div>
+
+  <div id="zone" data-page-node-id="5v3ntM9qm2l2U5t0tlnVP0"></div>
+  <div id="toast" data-page-node-id="3MUgzDStMBdvL5pyygSPNH"></div>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script src="js/util.js"></script>
+<script src="js/godrays.js"></script>
+<script src="js/env.js"></script>
+<script src="js/terrain.js"></script>
+<script src="js/vegetation.js"></script>
+<script src="js/cabin.js"></script>
+<script src="js/creatures.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
