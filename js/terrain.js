@@ -547,6 +547,7 @@ FC.Terrain.prototype.buildRiver = function () {
       uDeep:   { value: new three.Color('#1e4f48') },
       uLite:   { value: new three.Color('#63a08a') },
       uSky:    { value: new three.Color('#9dc6e0') },
+      uSun:    { value: 0 },       // 黄昏暖霞在河面的强度（0~1）
       uFlow:   { value: 1 },       // 流速视觉倍率
       uRain:   { value: 0 }
     },
@@ -571,22 +572,40 @@ FC.Terrain.prototype.buildRiver = function () {
       }`,
     fragmentShader: `
       uniform vec3 uDeep, uLite, uSky;
-      uniform float uTime, uRain;
+      uniform float uTime, uRain, uSun;
       varying vec3 vPos;
       varying vec3 vN;
       void main(){
         vec3 n = normalize(vN);
         float fres = pow(1.0 - clamp(n.y, 0.0, 1.0), 2.0);
-        // 河心深、近岸浅
-        float bank = smoothstep(0.2, 1.0, abs(fract(vPos.z * 0.0)));
         vec3 col = mix(uDeep, uLite, clamp(n.y * 0.35 + 0.34, 0.0, 1.0));
         col = mix(col, uSky, clamp(fres * 1.25, 0.0, 0.75));
+
         // 流动高光条（模拟阳光在水面拉出的亮带）
         float sparkle = sin(vPos.z * 2.2 - uTime * 3.4 + sin(vPos.x * 1.7 + uTime) * 1.4);
         col += vec3(0.10, 0.11, 0.09) * max(0.0, sparkle) * (0.5 + fres);
+
+        /* —— 黄昏碎金：沿河道方向铺一层宽窄不匀的暖金反光带 ——
+           四道频率不同的正弦叠加 + 缓慢漂移，避免"整齐的网格"。
+           ① 宽缓的长波：整条河的暖色基调
+           ② 中频：拉出成片的金色反光斑
+           ③ 细高频：碎金闪烁颗粒 */
+        float g1 = sin(vPos.z * 0.42 - uTime * 0.62);
+        float g2 = sin(vPos.z * 1.06 + vPos.x * 0.75 - uTime * 1.02);
+        float g3 = sin(vPos.z * 2.35 - vPos.x * 0.55 - uTime * 1.55);
+        float g4 = sin(vPos.z * 5.1  + vPos.x * 1.9  - uTime * 2.4);
+        float gold = max(0.0, g1 * 0.42 + g2 * 0.30 + g3 * 0.22 + g4 * 0.16);
+        gold = pow(gold, 1.25);
+        vec3 goldCol = vec3(1.00, 0.70, 0.36);
+        col += goldCol * gold * uSun * (0.55 + fres * 2.4);
+
+        // 暖霞整体染色：让河面在水天相接处呈现暮色
+        col = mix(col, goldCol * 0.80, uSun * 0.42 * (0.30 + fres));
+
         // 雨点打在河面的细碎环纹
         float rip = sin(vPos.x * 7.3 + uTime * 5.1) * sin(vPos.z * 8.1 - uTime * 4.6);
         col += vec3(0.10) * max(0.0, rip) * uRain * 1.4;
+
         // 透明度：越靠近俯视中心越透，斜看反光更实（露出水下的鱼）
         float see = clamp(n.y * 1.1 - 0.25, 0.0, 1.0);
         float a = mix(0.94, 0.62, see);
@@ -776,7 +795,92 @@ FC.Terrain.prototype.buildBridge = function () {
   this.bridge = m;
 
   // 供生物/音频使用的取水点与桥面信息
-  this.bridgeInfo = { x: cx0, z: zB, span, deckY: deckTop(0.5), deckW, yL, yR };
+  this.bridgeInfo = { x: cx0, z: zB, span, deckY: deckTop(0.5), deckW, yL, yR, deckTop };
+
+  /* 桥上的石灯（夜景重点） */
+  this.buildBridgeLamps();
+};
+
+/* ============================================================ */
+/* 桥上石灯：挂在桥面栏杆柱头上，随天色自动点亮
+   ⚠️ 桥离小屋较远、相机经常隔水远看，所以灯要"看得见"：
+      自发光球 + 一层暖色光晕 sprite（放大到 1.5~3）+ 两端各一盏点光。
+      灯架几何体合并成单个 mesh，省 draw call。 */
+FC.Terrain.prototype.buildBridgeLamps = function () {
+  const three = FC.THREE;
+  const B = this.bridgeInfo;
+  if (!B || !B.deckTop) return;
+  const DECK_W = B.deckW;
+
+  this.bridgeLamps = [];
+
+  /* 灯位：沿桥长取 3 个点（两端 + 正中央），两侧对称 → 共 6 盏 */
+  const us = [0.06, 0.5, 0.94];
+  const spots = [];
+  us.forEach(u => {
+    const x = B.x - B.span / 2 + B.span * u;
+    const top = B.deckTop(u);
+    spots.push({ x, y: top, u });
+  });
+
+  const lampParts = [];   // 石制灯架合并成一个 mesh（省 draw call）
+  spots.forEach((s, si) => {
+    [-1, 1].forEach(side => {
+      const z = B.z + side * (DECK_W / 2 - 0.10);
+      // 立柱顶的球头 → 灯笼挂在它下面一点
+      const hangY = s.y + 0.50;
+
+      // —— 灯架（石制 + 深色金属灯身）——
+      const arm = new three.CylinderGeometry(0.012, 0.012, 0.26, 5);
+      arm.translate(s.x, hangY + 0.13, z);
+      FC.tintGeo(arm, '#2f2a24');
+      lampParts.push(arm);
+
+      // 灯罩（小伞形，暖色半透）
+      const shade = new three.ConeGeometry(0.115, 0.13, 6, 1, true);
+      shade.translate(s.x, hangY + 0.04, z);
+      FC.tintGeo(shade, '#332d24');
+      lampParts.push(shade);
+
+      // 灯身底座
+      const base = new three.CylinderGeometry(0.052, 0.062, 0.045, 6);
+      base.translate(s.x, hangY - 0.145, z);
+      FC.tintGeo(base, '#2f2a24');
+      lampParts.push(base);
+
+      // —— 灯泡（自发光球，稍大一圈，远处也能看见）——
+      const glassMat = new three.MeshStandardMaterial({
+        color: '#ffe0b0', emissive: new three.Color('#ffb055'), emissiveIntensity: 0,
+        roughness: .30, metalness: 0, transparent: true, opacity: .96
+      });
+      const bulb = new three.Mesh(new three.SphereGeometry(0.072, 8, 6), glassMat);
+      bulb.position.set(s.x, hangY - 0.07, z);
+      this.group.add(bulb);
+
+      // —— 光晕 sprite（隔水远看时主要靠它看见灯）——
+      const glow = new three.Sprite(new three.SpriteMaterial({
+        map: FC.makeGlowTexture(), color: new three.Color('#ffc274'),
+        transparent: true, opacity: 0, blending: three.AdditiveBlending, depthWrite: false
+      }));
+      glow.scale.set(1.5, 1.5, 1);
+      glow.position.set(s.x, hangY - 0.07, z);
+      this.group.add(glow);
+
+      // —— 点光：只给两端两站（共 4 盏），控制场景光源总数 ——
+      let light = null;
+      if (this.quality !== 'low' && si !== 1) {
+        light = new three.PointLight(new three.Color('#ffbd74'), 0, 6.4, 2.0);
+        light.position.set(s.x, hangY - 0.09, z);
+        this.group.add(light);
+      }
+
+      this.bridgeLamps.push({ glassMat, glow, light, phase: (si * 2 + (side > 0 ? 1 : 0)) * 1.3 });
+    });
+  });
+
+  const frameMesh = new three.Mesh(FC.mergeGeos(lampParts), FC.matVertex({ rough: .82 }));
+  frameMesh.castShadow = true;
+  this.group.add(frameMesh);
 };
 
 /* ============================================================ */
@@ -957,5 +1061,32 @@ FC.Terrain.prototype.update = function (dt, env) {
     const night = FC.clamp(1 - env.cur.ambIntensity / 0.55, 0, 1);
     u.uDeep.value.set('#1e4f48').lerp(new FC.THREE.Color('#0d1e20'), night * 0.85);
     u.uLite.value.set('#63a08a').lerp(new FC.THREE.Color('#1a3032'), night * 0.8);
+
+    /* 黄昏（暮色）：太阳低垂、天光转暖时，河面要"接住"这片暖霞。
+       判据 = 主光偏暖（r 明显大于 b）且强度中等 → 判定为黄昏/斜阳。
+       命中时把 uSun（暖色增益）抬起，河面碎金会明显变亮变暖。 */
+    const sc = env.cur.sunColor;
+    const warm = FC.clamp((sc.r / Math.max(sc.b, 1e-3) - 1.05) / 1.6, 0, 1);
+    const lowSun = FC.clamp(1 - env.cur.sunElev / 20, 0, 1);
+    u.uSun.value = warm * lowSun * FC.clamp(env.cur.sunIntensity / 1.6, 0, 1);
+    // 黄昏时天光反射色也拉暖一点（天在河里是暖橙，而不是白天那种冷蓝）
+    if (u.uSun.value > 0.02) {
+      u.uSky.value.lerp(new FC.THREE.Color('#ffb877'), u.uSun.value * 0.5);
+    }
+  }
+  /* 桥上石灯：与屋檐灯同一条"天色暗度"曲线 */
+  if (this.bridgeLamps) {
+    const dark = FC.clamp(1 - env.cur.sunIntensity / 1.9, 0, 1);
+    const duskBoost = FC.clamp(1 - env.cur.sunIntensity / 2.05, 0, 1);
+    const base = Math.max(dark, duskBoost * 0.55);
+    for (let i = 0; i < this.bridgeLamps.length; i++) {
+      const L = this.bridgeLamps[i];
+      const f = base * (0.95 + 0.05 * Math.sin(this.time * 3.9 + L.phase));
+      L.glassMat.emissiveIntensity = f * 4.6;
+      L.glow.material.opacity = f * 1.0;
+      const gs = 1.5 + f * 1.5;
+      L.glow.scale.set(gs, gs, 1);
+      if (L.light) L.light.intensity = f * 2.4;
+    }
   }
 };
