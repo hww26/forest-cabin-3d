@@ -4,7 +4,9 @@
    ② 雨：高通白噪声 + 随机"雨滴"脉冲
    ③ 炉火：低频噪声爆发 + 偶发噼啪
    ④ 鸟鸣：定时触发的短促 FM 音
-   ⑤ 室内闷响感：切换场景时整体音量/滤波变化
+   ⑤ 树梢沙沙：高通噪声 + 随风强弱起伏（阵风时更明显）
+   ⑥ 河流：双层持续水声（低涌 + 高跳），按相机到河的距离衰减
+   ⑦ 室内闷响感：切换场景时整体音量/滤波变化
    ============================================================ */
 FC.Audio = function () {
   this.ctx = null;
@@ -16,6 +18,7 @@ FC.Audio = function () {
   this.timer = 0;
   this.birdTimer = 3;
   this.crackleTimer = 1;
+  this.camDistToRiver = 99;      // 由 main 每帧更新
 };
 
 FC.Audio.prototype.init = function () {
@@ -85,6 +88,50 @@ FC.Audio.prototype.init = function () {
   this.fireGain.connect(this.indoorGain);
   this.fireSrc.start();
 
+  /* ---------- 树梢沙沙：高频噪声 + LFO 起伏（风大的天气更响） ---------- */
+  this.leavesSrc = ctx.createBufferSource();
+  this.leavesSrc.buffer = buf; this.leavesSrc.loop = true;
+  this.leavesHP = ctx.createBiquadFilter();
+  this.leavesHP.type = 'highpass'; this.leavesHP.frequency.value = 3200;
+  this.leavesBP = ctx.createBiquadFilter();
+  this.leavesBP.type = 'bandpass'; this.leavesBP.frequency.value = 5200; this.leavesBP.Q.value = 0.5;
+  this.leavesGain = ctx.createGain(); this.leavesGain.gain.value = 0;
+  this.leavesSrc.connect(this.leavesHP); this.leavesHP.connect(this.leavesBP);
+  this.leavesBP.connect(this.leavesGain); this.leavesGain.connect(this.outFilter);
+  // 沙沙的"阵风"起伏：两条不同频率的 LFO 叠加，听起来不机械
+  this.leavesLFO1 = ctx.createOscillator();
+  this.leavesLFO1.type = 'sine'; this.leavesLFO1.frequency.value = 0.13;
+  this.leavesLFO1G = ctx.createGain(); this.leavesLFO1G.gain.value = 0.006;
+  this.leavesLFO1.connect(this.leavesLFO1G); this.leavesLFO1G.connect(this.leavesGain.gain);
+  this.leavesLFO1.start();
+  this.leavesLFO2 = ctx.createOscillator();
+  this.leavesLFO2.type = 'triangle'; this.leavesLFO2.frequency.value = 0.031;
+  this.leavesLFO2G = ctx.createGain(); this.leavesLFO2G.gain.value = 0.004;
+  this.leavesLFO2.connect(this.leavesLFO2G); this.leavesLFO2G.connect(this.leavesGain.gain);
+  this.leavesLFO2.start();
+  this.leavesSrc.start();
+
+  /* ---------- 河流：低涌(200Hz 低通) + 高跳(1.2k 带通) 双层 ---------- */
+  this.riverSrc = ctx.createBufferSource();
+  this.riverSrc.buffer = buf; this.riverSrc.loop = true;
+  this.riverSrc.playbackRate.value = 0.85;
+  this.riverLP = ctx.createBiquadFilter();
+  this.riverLP.type = 'lowpass'; this.riverLP.frequency.value = 260; this.riverLP.Q.value = 0.9;
+  this.riverGain = ctx.createGain(); this.riverGain.gain.value = 0;
+  this.riverSrc.connect(this.riverLP); this.riverLP.connect(this.riverGain);
+  this.riverGain.connect(this.outFilter);
+  // 高频层：水花/汩汩
+  this.riverHiSrc = ctx.createBufferSource();
+  this.riverHiSrc.buffer = buf; this.riverHiSrc.loop = true;
+  this.riverHiSrc.playbackRate.value = 1.35;
+  this.riverBP = ctx.createBiquadFilter();
+  this.riverBP.type = 'bandpass'; this.riverBP.frequency.value = 1300; this.riverBP.Q.value = 0.6;
+  this.riverHiGain = ctx.createGain(); this.riverHiGain.gain.value = 0;
+  this.riverHiSrc.connect(this.riverBP); this.riverBP.connect(this.riverHiGain);
+  this.riverHiGain.connect(this.outFilter);
+  this.riverSrc.start();
+  this.riverHiSrc.start();
+
   this.enabled = true;
   return true;
 };
@@ -104,6 +151,12 @@ FC.Audio.prototype.setWeather = function (id) {
   this.weather = id;
   const t = this.ctx.currentTime;
   const set = (param, v, time) => { param.setTargetAtTime(v, this.ctx.currentTime, time || 0.6); };
+  // 树梢沙沙基础音量：风越大越响
+  const leaves = { sunny: 0.012, mist: 0.006, rain: 0.016, dusk: 0.010, night: 0.007 }[id] || 0.01;
+  set(this.leavesGain.gain, leaves, 1.2);
+  // 河流基础音量（实际还要乘上距离衰减，见 updateRiver）
+  set(this.riverGain.gain, 0.10, 1.0);
+  set(this.riverHiGain.gain, 0.05, 1.0);
   switch (id) {
     case 'sunny':
       set(this.windGain.gain, 0.055); set(this.rainGain.gain, 0.0);
@@ -155,14 +208,31 @@ FC.Audio.prototype.update = function (dt) {
       this.crackle();
     }
   }
-  /* 鸟鸣（晴天/黄昏，室外） */
-  if (!this.indoor && (mw === 'sunny' || mw === 'dusk')) {
+  /* 鸟鸣：晴天/黄昏/雾天清晨都叫；夜晚偶尔一声猫头鹰式的低鸣；雨天安静 */
+  if (!this.indoor && mw !== 'rain') {
+    const isOwl = (mw === 'night');
     this.birdTimer -= dt;
     if (this.birdTimer <= 0) {
-      this.birdTimer = FC.rand(2.5, 9);
-      this.chirp();
+      // 白天 2.5~9s 一叫；夜晚 9~20s 一声低鸣
+      this.birdTimer = isOwl ? FC.rand(9, 20) : FC.rand(2.2, 7.5);
+      this.chirp(isOwl);
     }
   }
+
+  /* 河流：按相机到河的距离调音量（近响远轻，室内隔墙衰减） */
+  this.updateRiver();
+};
+
+/* ---------- 河流水声随距离衰减 ---------- */
+FC.Audio.prototype.updateRiver = function () {
+  if (!this.ctx) return;
+  const d = this.camDistToRiver;
+  // 8m 内全响，40m 外基本听不见（户外还能隐约听到，故不完全归零）
+  const att = FC.clamp(1 - (d - 8) / 32, 0.08, 1);
+  const indoorMul = this.indoor ? 0.35 : 1;
+  const t = this.ctx.currentTime;
+  this.riverGain.gain.setTargetAtTime(0.10 * att * indoorMul, t, 0.4);
+  this.riverHiGain.gain.setTargetAtTime(0.05 * att * indoorMul, t, 0.4);
 };
 
 /* ---------- 单次音效 ---------- */
@@ -182,10 +252,27 @@ FC.Audio.prototype.crackle = function () {
   s.start(t, Math.random() * 2, 0.4);
 };
 
-FC.Audio.prototype.chirp = function () {
+FC.Audio.prototype.chirp = function (owl) {
   if (!this.ctx) return;
   const ctx = this.ctx, t = ctx.currentTime;
-  const notes = 2 + (Math.random() * 3 | 0);
+  if (owl) {
+    // 夜晚猫头鹰：低沉的两音"咕——咕"
+    for (let i = 0; i < 2; i++) {
+      const st = t + i * 0.42;
+      const o = ctx.createOscillator();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(340, st);
+      o.frequency.exponentialRampToValueAtTime(290, st + 0.22);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, st);
+      g.gain.linearRampToValueAtTime(0.020, st + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0004, st + 0.38);
+      o.connect(g); g.connect(this.outFilter);
+      o.start(st); o.stop(st + 0.45);
+    }
+    return;
+  }
+  const notes = 2 + (Math.random() * 4 | 0);
   const base = 1800 + Math.random() * 1400;
   for (let i = 0; i < notes; i++) {
     const st = t + i * FC.rand(0.055, 0.14);
