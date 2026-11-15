@@ -10,8 +10,26 @@ FC.smoothstep = function (a, b, x) {
 
 /* ---------- 地形高度场 ----------
    小屋与空地（半径 17 内）保持水平，向外逐渐起伏成丘陵
-   右侧后方挖一个池塘凹陷 */
+   右侧后方挖一个池塘凹陷
+   东侧挖一条南北走向的蜿蜒河流（z 从 -70 到 +70） */
 FC.POND = { x: 17, z: -20, r: 5.6, depth: 2.7 };
+/* 河道：小屋东侧，只走 z ∈ [6, 72]（北段穿林），避开池塘(z=-20) */
+FC.RIVER = {
+  z0: 6, z1: 72,          // 河道起止
+  waterY: -0.85,          // 全局水面高度（比小屋地坪低）
+  depth: 2.2,             // 河床再往下挖的深度
+  halfW: 3.4,             // 河道半宽（水面处）
+  bankW: 2.6,             // 岸坡过渡带宽度
+  riverX: function (z) {  // 蜿蜒中心线
+    return 26 + Math.sin(z * 0.05) * 5.5 + Math.sin(z * 0.13 + 1.7) * 2.4;
+  },
+  // 桥的位置（离空地近，转头可见）
+  bridgeZ: 14
+};
+FC.riverDist = function (x, z) {   // 点到河道中心线的横向距离（河道外返回大值）
+  if (z < FC.RIVER.z0 || z > FC.RIVER.z1) return 1e9;
+  return Math.abs(x - FC.RIVER.riverX(z));
+};
 FC.terrainHeight = function (x, z) {
   const r = Math.hypot(x, z);
   const flat = FC.smoothstep(17, 42, r);
@@ -22,6 +40,26 @@ FC.terrainHeight = function (x, z) {
   const px = x - FC.POND.x, pz = z - FC.POND.z;
   const pd2 = px * px + pz * pz;
   h -= FC.POND.depth * Math.exp(-pd2 / (2 * 4.6 * 4.6));
+  // 河道剖面：水线以内钳位出河床；水线到岸顶平滑混回自然地形（不产生峭壁）
+  const rd = FC.riverDist(x, z);
+  const W = FC.RIVER.halfW, B = FC.RIVER.bankW;
+  if (rd < W + B) {
+    if (rd <= W) {
+      // 河床：中心最深，到水线处抬到水面下 0.14
+      const t = FC.smoothstep(0, W, rd);
+      const bed = FC.RIVER.waterY - FC.RIVER.depth * (1 - t) - 0.14;
+      if (h > bed) h = bed;
+    } else {
+      // 岸坡：从"水下岸台"平滑混回自然地形
+      const sB = FC.smoothstep(W, W + B, rd);
+      const lo = Math.min(h, FC.RIVER.waterY - 0.14);
+      const hb = lo + (h - lo) * sB;
+      // 湿岸浅滩：在水线上方托一条窄平台，保证水面条带边缘总埋进岸里
+      const fs = FC.smoothstep(W + 0.2, W + 0.7, rd) * (1 - FC.smoothstep(W + 1.3, W + B, rd));
+      const floor = FC.RIVER.waterY + 0.62 * fs - 0.30 * (1 - fs);
+      h = Math.max(hb, floor);
+    }
+  }
   return h;
 };
 
@@ -30,6 +68,7 @@ FC.blocked = function (x, z) {
   if (Math.abs(x) < 6.6 && Math.abs(z) < 6.6) return true;              // 小屋及屋檐
   const pd = Math.hypot(x - FC.POND.x, z - FC.POND.z);
   if (pd < 7.6) return true;                                            // 池塘
+  if (FC.riverDist(x, z) < FC.RIVER.halfW + FC.RIVER.bankW + 0.8) return true;  // 河道及岸坡
   return false;
 };
 
@@ -60,6 +99,12 @@ FC.Terrain = function (scene, quality) {
   this.buildRocks();
   /* ---------------- 池塘 ---------------- */
   this.buildPond();
+  /* ---------------- 河流 ---------------- */
+  this.buildRiver();
+  /* ---------------- 拱桥 ---------------- */
+  this.buildBridge();
+  /* ---------------- 水草 ---------------- */
+  this.buildRiverWeeds();
   /* ---------------- 蘑菇 / 蕨类 ---------------- */
   this.buildDetails();
 };
@@ -123,6 +168,12 @@ FC.Terrain.prototype.buildGround = function () {
     if (pd < 8.4) {
       const w = 1 - FC.smoothstep(4.2, 8.4, pd);
       c.lerp(sand, w * 0.72);
+    } else if (FC.riverDist(x, z) < FC.RIVER.halfW + FC.RIVER.bankW + 1.6) {
+      // 河岸湿沙：越靠水边越湿越深
+      const rd = FC.riverDist(x, z);
+      const w = 1 - FC.smoothstep(FC.RIVER.halfW - 0.4, FC.RIVER.halfW + FC.RIVER.bankW + 1.6, rd);
+      c.lerp(sand, w * 0.78);
+      if (rd < FC.RIVER.halfW * 0.8) c.lerp(new three.Color('#4e4636'), 0.55);  // 水下河床深色
     } else {
       // 随机草色斑块，打破单一（幅度加大 → 避免整片地面变成一块均匀亮绿）
       c.offsetHSL(0, (rng() - .5) * 0.11, (rng() - .5) * 0.075);
@@ -458,6 +509,341 @@ FC.Terrain.prototype.buildPond = function () {
 };
 
 /* ============================================================ */
+/* 河流：沿蜿蜒中心线铺一条低模水面（顶点起伏模拟流动） */
+FC.Terrain.prototype.buildRiver = function () {
+  const three = FC.THREE;
+  const R = FC.RIVER;
+  // 河面：沿中心线每 2m 一个横截面，横向 7 个采样点，覆盖 z ∈ [z0, z1]
+  const verts = [], idx = [];
+  const Z0 = R.z0, Z1 = R.z1, STEP = 2.2, COLS = 7;
+  let row = 0;
+  for (let z = Z0; z <= Z1; z += STEP, row++) {
+    const cx = R.riverX(z);
+    for (let k = 0; k < COLS; k++) {
+      const t = k / (COLS - 1);                      // 0~1 横向
+      const x = cx + (t - 0.5) * 2 * (R.halfW + 0.7); // 稍微盖过岸线
+      // 河面横向边缘略微翘起，插入岸里避免露缝
+      const edge = Math.abs(t - 0.5) * 2;            // 0 中心 → 1 边缘
+      const y = R.waterY + edge * edge * 0.55;
+      verts.push(x, y, z + (row % 2) * 0.4);         // 行间错位，破整齐感
+    }
+  }
+  const cols = Math.round((Z1 - Z0) / STEP);
+  for (let r = 0; r < cols; r++) {
+    for (let k = 0; k < COLS - 1; k++) {
+      const a = r * COLS + k, b = a + COLS;
+      idx.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+  }
+  const geo = new three.BufferGeometry();
+  geo.setAttribute('position', new three.Float32BufferAttribute(verts, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+
+  // 水流方向 = 沿 z 轴（河道南北走向）
+  this.riverMat = new three.ShaderMaterial({
+    uniforms: {
+      uTime:   { value: 0 },
+      uDeep:   { value: new three.Color('#1e4f48') },
+      uLite:   { value: new three.Color('#63a08a') },
+      uSky:    { value: new three.Color('#9dc6e0') },
+      uFlow:   { value: 1 },       // 流速视觉倍率
+      uRain:   { value: 0 }
+    },
+    vertexShader: `
+      uniform float uTime, uFlow;
+      varying vec3 vPos;
+      varying vec3 vN;
+      void main(){
+        vec3 p = position;
+        // 流动：沿 -z 方向推进的两列波 + 横向小涟漪
+        float flow = p.z * 0.55 + uTime * 2.3 * uFlow;
+        p.y += sin(flow * 2.1 + p.x * 1.3) * 0.045
+             + sin(flow * 3.7 - p.x * 2.2) * 0.028
+             + sin(p.x * 3.1 + uTime * 1.4) * 0.018;
+        vPos = p;
+        float e = 0.3;
+        float f = p.z * 0.55 + uTime * 2.3 * uFlow;
+        float dx = (sin(f*2.1+(p.x+e)*1.3)-sin(f*2.1+(p.x-e)*1.3)) * 0.045 * 0.5 / e;
+        float dy = (sin((p.z+e)*0.55*2.1+uTime*2.3*uFlow)-sin((p.z-e)*0.55*2.1+uTime*2.3*uFlow)) * 0.045 * 0.275 / e;
+        vN = normalize(vec3(-dx, 1.0, -dy));
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 uDeep, uLite, uSky;
+      uniform float uTime, uRain;
+      varying vec3 vPos;
+      varying vec3 vN;
+      void main(){
+        vec3 n = normalize(vN);
+        float fres = pow(1.0 - clamp(n.y, 0.0, 1.0), 2.0);
+        // 河心深、近岸浅
+        float bank = smoothstep(0.2, 1.0, abs(fract(vPos.z * 0.0)));
+        vec3 col = mix(uDeep, uLite, clamp(n.y * 0.35 + 0.34, 0.0, 1.0));
+        col = mix(col, uSky, clamp(fres * 1.25, 0.0, 0.75));
+        // 流动高光条（模拟阳光在水面拉出的亮带）
+        float sparkle = sin(vPos.z * 2.2 - uTime * 3.4 + sin(vPos.x * 1.7 + uTime) * 1.4);
+        col += vec3(0.10, 0.11, 0.09) * max(0.0, sparkle) * (0.5 + fres);
+        // 雨点打在河面的细碎环纹
+        float rip = sin(vPos.x * 7.3 + uTime * 5.1) * sin(vPos.z * 8.1 - uTime * 4.6);
+        col += vec3(0.10) * max(0.0, rip) * uRain * 1.4;
+        // 透明度：越靠近俯视中心越透，斜看反光更实（露出水下的鱼）
+        float see = clamp(n.y * 1.1 - 0.25, 0.0, 1.0);
+        float a = mix(0.94, 0.62, see);
+        gl_FragColor = vec4(col, a);
+      }`,
+    transparent: true,
+    side: three.DoubleSide
+  });
+  this.river = new three.Mesh(geo, this.riverMat);
+  this.river.renderOrder = 1;
+  this.river.receiveShadow = false;
+  this.group.add(this.river);
+
+  // 岸边一排卵石（顺河走，隔几个随机丢）
+  const stones = [];
+  const rng = FC.rng(4711);
+  for (let z = Z0 + 1.5; z < Z1 - 1.5; z += 1.1) {
+    if (rng() < 0.55) continue;
+    const side = rng() < 0.5 ? -1 : 1;
+    const off = R.halfW + R.bankW * (0.15 + rng() * 0.75);
+    const x = R.riverX(z) + side * off;
+    if (FC.blocked(x, z)) continue;
+    const s = 0.14 + rng() * 0.30;
+    const g = new three.IcosahedronGeometry(s, 0);
+    const p = g.attributes.position;
+    for (let k = 0; k < p.count; k++) {
+      p.setXYZ(k, p.getX(k) * (1 + (rng() - .5) * .4), p.getY(k) * 0.55, p.getZ(k) * (1 + (rng() - .5) * .4));
+    }
+    g.computeVertexNormals();
+    FC.place(g, x, FC.terrainHeight(x, z) + s * 0.18, z, 1, rng() * 6.28);
+    FC.tintGeo(g, rng() < .5 ? '#8d8678' : '#77705f');
+    stones.push(g);
+  }
+  if (stones.length) {
+    const m = new three.Mesh(FC.mergeGeos(stones), FC.matVertex({ rough: .97 }));
+    m.castShadow = true; m.receiveShadow = true;
+    this.group.add(m);
+  }
+};
+
+/* ============================================================ */
+/* 拱桥：跨在河上（z = bridgeZ）
+   结构：半圆石拱圈（切向砌块）+ 拱肩挡墙 + 两端落岸的桥面 + 石栏杆
+   关键：桥面高度沿 x 用"两端贴岸 + 中央抛物线起拱"剖面，保证端头真的落在岸坡上 */
+FC.Terrain.prototype.buildBridge = function () {
+  const three = FC.THREE;
+  const R = FC.RIVER;
+  const zB = R.bridgeZ;
+  const cx0 = R.riverX(zB);
+
+  // 桥全长：稍多于（水面半宽 + 岸坡带宽），端头正好压在两岸岸顶
+  const span = (R.halfW + R.bankW + 0.9) * 2;
+  const deckW = 2.3;                                   // 桥面宽
+  const xL = cx0 - span / 2, xR = cx0 + span / 2;
+  const yL = FC.terrainHeight(xL, zB);                 // 西端（空地一侧）岸面高
+  const yR = FC.terrainHeight(xR, zB);                 // 东端（丘陵一侧）岸面高
+  const rise = 1.1;                                    // 中央拱起量
+  // 桥面顶面标高：两端贴岸，中央抛物线起拱（u∈[0,1] 沿桥长）
+  const deckTop = u => yL + (yR - yL) * u + rise * 4 * u * (1 - u);
+
+  // 拱圈：半圆，起拱线略高于水面
+  const rA = R.halfW;                                  // 拱圈中线半径
+  const yC = R.waterY + 0.07;                          // 起拱线标高
+  const ringT = 0.5;                                   // 拱圈厚度
+  const rOut = rA + ringT / 2, rIn = rA - ringT / 2;
+
+  const geos = [];
+  const STONE = ['#9a9284', '#8b8375', '#a29a8a'];
+  const LITE  = '#b0a898';
+
+  /* —— 拱圈：沿半圆砌一圈切向石块 —— */
+  const arcSeg = 15;
+  for (let i = 0; i < arcSeg; i++) {
+    const a0 = Math.PI * (i / arcSeg), a1 = Math.PI * ((i + 1) / arcSeg);
+    const am = (a0 + a1) / 2;
+    const arcLen = (a1 - a0) * rA * 1.06;
+    const block = new three.BoxGeometry(arcLen, ringT, deckW * 0.92);
+    FC.tintGeo(block, STONE[i % STONE.length]);
+    // 先绕 Z 转 (am + π/2)，把盒子的长边（局部 x）摆到圆的切线方向
+    const m4 = new three.Matrix4().makeRotationZ(am + Math.PI / 2);
+    m4.setPosition(cx0 + Math.cos(am) * rA, yC + Math.sin(am) * rA, zB);
+    block.applyMatrix4(m4);
+    geos.push(block);
+  }
+  /* 拱脚墩石：两端起拱处压两块大方石 */
+  [-1, 1].forEach(s => {
+    const bx = cx0 + s * rA;
+    const b = new three.BoxGeometry(1.1, 1.3, deckW * 0.96);
+    FC.tintGeo(b, STONE[1]);
+    FC.place(b, bx, yC - 0.25, zB, 1, 0);
+    geos.push(b);
+  });
+
+  /* —— 拱肩挡墙 + 桥面：逐段生成，墙填充拱圈/地面与桥面底之间的空隙 —— */
+  const deckSegs = 11;
+  const slabT = 0.24;
+  for (let i = 0; i < deckSegs; i++) {
+    const u0 = i / deckSegs, u1 = (i + 1) / deckSegs;
+    const um = (u0 + u1) / 2;
+    const x0 = cx0 - span / 2 + span * u0, x1 = cx0 - span / 2 + span * u1;
+    const xm = (x0 + x1) / 2;
+    const top = deckTop(um);
+    const deckBot = top - slabT;
+
+    /* 挡墙：底边取"拱圈外弧顶"或"自然地坪"，两者取上包络 */
+    const dx = Math.abs(xm - cx0);
+    let bottom;
+    if (dx <= rOut) {
+      bottom = yC + Math.sqrt(Math.max(0.01, rOut * rOut - dx * dx));
+    } else {
+      bottom = Math.min(FC.terrainHeight(xm, zB), deckBot - 0.05);
+    }
+    if (deckBot - bottom > 0.06) {
+      const wall = new three.BoxGeometry((x1 - x0) * 1.01, deckBot - bottom, deckW * 0.95);
+      FC.tintGeo(wall, STONE[(i + 2) % 3]);
+      FC.place(wall, xm, (deckBot + bottom) / 2, zB, 1, 0);
+      geos.push(wall);
+    }
+
+    /* 桥面板 */
+    const slab = new three.BoxGeometry((x1 - x0) * 1.04, slabT, deckW);
+    FC.tintGeo(slab, STONE[(i + 1) % 3]);
+    FC.place(slab, xm, top - slabT / 2, zB, 1, 0);
+    geos.push(slab);
+
+    /* 桥面边缘压顶石（浅色窄条，增加石桥质感） */
+    for (let side = -1; side <= 1; side += 2) {
+      const cop = new three.BoxGeometry((x1 - x0) * 1.02, 0.09, 0.20);
+      FC.tintGeo(cop, LITE);
+      FC.place(cop, xm, top + 0.04, zB + side * (deckW / 2 - 0.10), 1, 0);
+      geos.push(cop);
+    }
+  }
+
+  /* —— 栏杆：桥面两侧矮柱 + 扶手（贴合桥面曲线） —— */
+  for (let side = -1; side <= 1; side += 2) {
+    const posts = 8;
+    const zR = zB + side * (deckW / 2 - 0.12);
+    for (let i = 0; i <= posts; i++) {
+      const u = i / posts;
+      const x = cx0 - span / 2 + span * u;
+      const top = deckTop(u);
+      const post = new three.CylinderGeometry(0.075, 0.09, 0.52, 6);
+      FC.tintGeo(post, '#8b8375');
+      FC.place(post, x, top + 0.28, zR, 1, 0);
+      geos.push(post);
+      if (i % 2 === 0) {
+        const ball = new three.SphereGeometry(0.105, 6, 4);
+        FC.tintGeo(ball, '#a89f8d');
+        FC.place(ball, x, top + 0.58, zR, 1, 0);
+        geos.push(ball);
+      }
+    }
+    // 扶手：分 5 段折线贴桥面坡度
+    for (let i = 0; i < 5; i++) {
+      const u0 = i / 5, u1 = (i + 1) / 5;
+      const x0 = cx0 - span / 2 + span * u0, x1 = cx0 - span / 2 + span * u1;
+      const xm = (x0 + x1) / 2;
+      const ym = (deckTop(u0) + deckTop(u1)) / 2 + 0.52;
+      const segLen = Math.hypot(x1 - x0, deckTop(u1) - deckTop(u0)) * 1.02;
+      const slope = Math.atan2(deckTop(u1) - deckTop(u0), x1 - x0);
+      const rail = new three.BoxGeometry(segLen, 0.07, 0.10);
+      FC.tintGeo(rail, '#9a9284');
+      // 先绕 Z 倾斜，再平移到目标位置
+      const mr = new three.Matrix4().makeRotationZ(slope);
+      mr.setPosition(xm, ym, zR);
+      rail.applyMatrix4(mr);
+      geos.push(rail);
+    }
+  }
+
+  /* —— 两端引桥护坡石（压住桥台与岸坡交界） —— */
+  [-1, 1].forEach(s => {
+    const x = cx0 + s * (span / 2 + 0.3);
+    const y = FC.terrainHeight(x, zB);
+    for (let k = 0; k < 4; k++) {
+      const st = new three.IcosahedronGeometry(0.26 + (k % 2) * 0.14, 0);
+      FC.tintGeo(st, STONE[k % 3]);
+      FC.place(st, x + s * k * 0.32, y + 0.08, zB + (k - 1.5) * 0.5, 1, k * 1.3);
+      geos.push(st);
+    }
+  });
+
+  const m = new three.Mesh(FC.mergeGeos(geos), FC.matVertex({ rough: .94 }));
+  m.castShadow = true; m.receiveShadow = true;
+  this.group.add(m);
+  this.bridge = m;
+
+  // 供生物/音频使用的取水点与桥面信息
+  this.bridgeInfo = { x: cx0, z: zB, span, deckY: deckTop(0.5), deckW, yL, yR };
+};
+
+/* ============================================================ */
+/* 水草：河道两岸水线内外，长条叶随"水流+风"摆动（复用全局风 uniform） */
+FC.Terrain.prototype.buildRiverWeeds = function () {
+  const three = FC.THREE;
+  const R = FC.RIVER;
+  const N = this.quality === 'low' ? 60 : 150;
+  const verts = [], cols = [], idx = [];
+  const rng = FC.rng(8264);
+  const c1 = new three.Color('#2f5d3a'), c2 = new three.Color('#4a7d4a'), c3 = new three.Color('#5f9455');
+  let vo = 0;
+  let placed = 0, guard = 0;
+  while (placed < N && guard < N * 20) {
+    guard++;
+    const z = R.z0 + 1.2 + rng() * (R.z1 - R.z0 - 2.4);
+    const side = rng() < 0.5 ? -1 : 1;
+    // 水线内外：off ∈ [-0.5(水下) ~ +1.2(湿岸)]
+    const offF = -0.35 + rng() * 1.45;
+    const x = R.riverX(z) + side * (R.halfW + offF);
+    const y = FC.terrainHeight(x, z);
+    // 水下的要贴河床，岸上的贴地面 —— terrainHeight 已保证
+    if (y > R.waterY + 0.75) continue;            // 太高处的不要（限制了只在岸边一条带）
+    const scale = 0.8 + rng() * 1.0;
+    const clumps = 2 + (rng() * 2 | 0);
+    for (let b = 0; b < clumps; b++) {
+      const ba = rng() * 6.28;
+      const bx = x + Math.cos(ba) * 0.14, bz = z + Math.sin(ba) * 0.14;
+      const hh = (0.35 + rng() * 0.5) * scale;
+      const w0 = 0.035 * scale;
+      const lean = (rng() - .5) * 0.5;
+      const dx = Math.cos(ba + 1.57) * lean, dz = Math.sin(ba + 1.57) * lean;
+      const tx = bx + dx * hh, tz = bz + dz * hh;
+      const px = -Math.sin(ba), pz = Math.cos(ba);
+      const c = rng() < .4 ? c1 : (rng() < .7 ? c2 : c3);
+      const cTip = c.clone().offsetHSL(0.01, 0, 0.12);
+      const put = (X, Y, Z, C) => {
+        verts.push(X, Y, Z);
+        cols.push(C.r, C.g, C.b);
+        vo++;
+      };
+      put(bx - px * w0, y, bz - pz * w0, c);
+      put(bx + px * w0, y, bz + pz * w0, c);
+      put(tx + px * w0 * 0.2, y + hh, tz + pz * w0 * 0.2, cTip);
+      put(tx - px * w0 * 0.2, y + hh, tz - pz * w0 * 0.2, cTip);
+      const o = vo - 4;
+      idx.push(o, o + 1, o + 2, o, o + 2, o + 3);
+    }
+    placed++;
+  }
+  const geo = new three.BufferGeometry();
+  geo.setAttribute('position', new three.Float32BufferAttribute(verts, 3));
+  geo.setAttribute('color', new three.Float32BufferAttribute(cols, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+
+  // 水草的摆动：与草甸同一套全局风 uniform，但相位用顶点 xz —— 顶点风注入方式一致即可
+  this.weedMat = new three.MeshStandardMaterial({
+    vertexColors: true, roughness: .9, metalness: 0, side: three.DoubleSide
+  });
+  FC.applyWind(this.weedMat, 0.5, 1.7, -0.6, 0.5);   // 幅度中等，水边柔摆
+  const m = new three.Mesh(geo, this.weedMat);
+  m.receiveShadow = true;
+  this.group.add(m);
+};
+
+/* ============================================================ */
 /* 蘑菇 / 蕨类 / 倒木：靠近小屋与路径的细节 */
 FC.Terrain.prototype.buildDetails = function () {
   const three = FC.THREE;
@@ -561,5 +947,15 @@ FC.Terrain.prototype.update = function (dt, env) {
     u.uSky.value.copy(env.cur.skyMid);
     u.uShallow.value.set('#3d6b62').lerp(new FC.THREE.Color(env.cur.fogColor), 0.18);
     u.uDeep.value.set(env.cur.ambIntensity > 0.55 ? '#1d3b3a' : '#131f28');
+  }
+  if (this.riverMat) {
+    const u = this.riverMat.uniforms;
+    u.uTime.value = this.time;
+    u.uRain.value = env.cur.rain;
+    u.uSky.value.copy(env.cur.skyMid);
+    // 天色：白天清亮绿松石，入夜压暗
+    const night = FC.clamp(1 - env.cur.ambIntensity / 0.55, 0, 1);
+    u.uDeep.value.set('#1e4f48').lerp(new FC.THREE.Color('#0d1e20'), night * 0.85);
+    u.uLite.value.set('#63a08a').lerp(new FC.THREE.Color('#1a3032'), night * 0.8);
   }
 };
