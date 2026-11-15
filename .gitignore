@@ -1,0 +1,6 @@
+# 临时/工具文件（不发布）
+_smoke.js
+_check_geo.js
+_shots/
+.newver/
+_api_upload.py
